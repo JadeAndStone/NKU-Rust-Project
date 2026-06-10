@@ -6,4 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-
+anyhow = "1.0"
+dunce = "1.0"
+rust-codingagent-core = { path = "../core" }
+rust-codingagent-tools = { path = "../tools" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"

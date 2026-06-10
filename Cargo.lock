@@ -349,6 +349,14 @@ dependencies = [
 [[package]]
 name = "rust-codingagent-rollback"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dunce",
+ "rust-codingagent-core",
+ "rust-codingagent-tools",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "rust-codingagent-tools"
