@@ -31,7 +31,7 @@ impl App {
             workspace = %self.config.workspace.display(),
             "starting agent main loop"
         );
-        let mut loop_runner = MainLoop::new(&self.config);
+        let mut loop_runner = MainLoop::new(&self.config)?;
         let status = loop_runner.run(reader, writer)?;
 
         match status {

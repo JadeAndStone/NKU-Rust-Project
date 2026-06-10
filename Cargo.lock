@@ -248,6 +248,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rust-codingagent-core",
  "serde",
  "toml",
  "tracing",
@@ -257,6 +258,11 @@ dependencies = [
 [[package]]
 name = "rust-codingagent-core"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "rust-codingagent-rollback"
