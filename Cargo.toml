@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/cli", "crates/core", "crates/tools", "crates/rollback"]
+default-members = ["crates/cli"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/NKU-Rust-Project/NKU-Rust-Project"
