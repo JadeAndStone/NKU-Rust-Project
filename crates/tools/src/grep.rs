@@ -7,7 +7,28 @@ use regex::Regex;
 use rust_codingagent_core::AgentContext;
 
 use crate::path::{resolve_existing_path, workspace_root};
-use crate::tool::{GrepMatch, ToolOutput};
+use crate::tool::{GrepMatch, Tool, ToolInput, ToolOutput};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GrepTool;
+
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn run(&self, context: &AgentContext, input: ToolInput) -> Result<ToolOutput> {
+        let ToolInput::Grep {
+            pattern,
+            path,
+            max_matches,
+        } = input
+        else {
+            bail!("grep tool received non-grep input");
+        };
+        run(context, pattern, path, max_matches)
+    }
+}
 
 pub(crate) fn run(
     context: &AgentContext,

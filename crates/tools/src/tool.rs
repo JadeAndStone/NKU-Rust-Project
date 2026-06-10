@@ -1,6 +1,16 @@
 use std::path::PathBuf;
 
+use anyhow::Result;
+use rust_codingagent_core::AgentContext;
 use serde::{Deserialize, Serialize};
+
+pub trait Tool {
+    fn name(&self) -> &str;
+
+    fn run(&self, context: &AgentContext, input: ToolInput) -> Result<ToolOutput>;
+}
+
+pub type ToolInput = ToolRequest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolRequest {

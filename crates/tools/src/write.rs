@@ -5,7 +5,28 @@ use anyhow::{bail, Context, Result};
 use rust_codingagent_core::AgentContext;
 
 use crate::path::{ensure_parent_dir, resolve_write_path};
-use crate::tool::ToolOutput;
+use crate::tool::{Tool, ToolInput, ToolOutput};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WriteTool;
+
+impl Tool for WriteTool {
+    fn name(&self) -> &str {
+        "write"
+    }
+
+    fn run(&self, context: &AgentContext, input: ToolInput) -> Result<ToolOutput> {
+        let ToolInput::Write {
+            path,
+            content,
+            overwrite,
+        } = input
+        else {
+            bail!("write tool received non-write input");
+        };
+        run(context, path, content, overwrite)
+    }
+}
 
 pub(crate) fn run(
     context: &AgentContext,

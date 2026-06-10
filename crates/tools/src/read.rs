@@ -5,7 +5,23 @@ use anyhow::{bail, Context, Result};
 use rust_codingagent_core::AgentContext;
 
 use crate::path::resolve_existing_path;
-use crate::tool::{truncate_to_bytes, ToolOutput};
+use crate::tool::{truncate_to_bytes, Tool, ToolInput, ToolOutput};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReadTool;
+
+impl Tool for ReadTool {
+    fn name(&self) -> &str {
+        "read"
+    }
+
+    fn run(&self, context: &AgentContext, input: ToolInput) -> Result<ToolOutput> {
+        let ToolInput::Read { path, max_bytes } = input else {
+            bail!("read tool received non-read input");
+        };
+        run(context, path, max_bytes)
+    }
+}
 
 pub(crate) fn run(
     context: &AgentContext,

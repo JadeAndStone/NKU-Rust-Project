@@ -5,7 +5,23 @@ use anyhow::{bail, Context, Result};
 use rust_codingagent_core::AgentContext;
 
 use crate::path::resolve_existing_path;
-use crate::tool::ToolOutput;
+use crate::tool::{Tool, ToolInput, ToolOutput};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EditTool;
+
+impl Tool for EditTool {
+    fn name(&self) -> &str {
+        "edit"
+    }
+
+    fn run(&self, context: &AgentContext, input: ToolInput) -> Result<ToolOutput> {
+        let ToolInput::Edit { path, old, new } = input else {
+            bail!("edit tool received non-edit input");
+        };
+        run(context, path, old, new)
+    }
+}
 
 pub(crate) fn run(
     context: &AgentContext,

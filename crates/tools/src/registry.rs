@@ -1,8 +1,12 @@
 use anyhow::Result;
 use rust_codingagent_core::AgentContext;
 
-use crate::tool::{ToolOutput, ToolRequest};
-use crate::{edit, grep, read, shell, write};
+use crate::edit::EditTool;
+use crate::grep::GrepTool;
+use crate::read::ReadTool;
+use crate::shell::ShellTool;
+use crate::tool::{Tool, ToolOutput, ToolRequest};
+use crate::write::WriteTool;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ToolRegistry;
@@ -14,23 +18,11 @@ impl ToolRegistry {
 
     pub fn run(&self, context: &AgentContext, request: ToolRequest) -> Result<ToolOutput> {
         match request {
-            ToolRequest::Read { path, max_bytes } => read::run(context, path, max_bytes),
-            ToolRequest::Write {
-                path,
-                content,
-                overwrite,
-            } => write::run(context, path, content, overwrite),
-            ToolRequest::Edit { path, old, new } => edit::run(context, path, old, new),
-            ToolRequest::Grep {
-                pattern,
-                path,
-                max_matches,
-            } => grep::run(context, pattern, path, max_matches),
-            ToolRequest::Shell {
-                command,
-                timeout_ms,
-                max_output_bytes,
-            } => shell::run(context, command, timeout_ms, max_output_bytes),
+            input @ ToolRequest::Read { .. } => ReadTool.run(context, input),
+            input @ ToolRequest::Write { .. } => WriteTool.run(context, input),
+            input @ ToolRequest::Edit { .. } => EditTool.run(context, input),
+            input @ ToolRequest::Grep { .. } => GrepTool.run(context, input),
+            input @ ToolRequest::Shell { .. } => ShellTool.run(context, input),
         }
     }
 }

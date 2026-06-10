@@ -12,8 +12,13 @@ mod shell;
 mod tool;
 mod write;
 
+pub use edit::EditTool;
+pub use grep::GrepTool;
+pub use read::ReadTool;
 pub use registry::{run_tool, ToolRegistry};
-pub use tool::{GrepMatch, ToolOutput, ToolRequest};
+pub use shell::ShellTool;
+pub use tool::{GrepMatch, Tool, ToolInput, ToolOutput, ToolRequest};
+pub use write::WriteTool;
 
 #[cfg(test)]
 mod tests {
