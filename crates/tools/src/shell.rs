@@ -8,7 +8,7 @@ use rust_codingagent_core::AgentContext;
 use crate::path::workspace_root;
 use crate::tool::{truncate_to_bytes, Tool, ToolInput, ToolOutput};
 
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Default, Clone, Copy)]

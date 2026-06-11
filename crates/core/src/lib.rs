@@ -11,7 +11,9 @@ mod store;
 mod time;
 
 pub use context::AgentContext;
-pub use message::{ConversationHistory, Message, MessageRole};
-pub use provider::{LanguageProvider, ProviderConfig, ProviderRequest, ProviderResponse};
+pub use message::{ConversationHistory, Message, MessageRole, ToolCall};
+pub use provider::{
+    LanguageProvider, ProviderConfig, ProviderRequest, ProviderResponse, ToolDefinition,
+};
 pub use session::{Session, SessionId, SessionSummary};
 pub use store::SessionStore;

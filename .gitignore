@@ -2,3 +2,9 @@
 **/*.rs.bk
 .rust-codingagent/
 **/.rust-codingagent/
+# Agent 测试产生，勿提交
+cc-haha/
+covid19-visualization/
+*.docx
+.rust-codingagent-history
+plan.md

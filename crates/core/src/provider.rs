@@ -25,15 +25,27 @@ impl ProviderConfig {
     }
 }
 
+/// Description of a tool/function available to the LLM.
+/// Follows the OpenAI function-calling schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRequest {
     pub context: AgentContext,
     pub messages: Vec<Message>,
+    pub tools: Vec<ToolDefinition>,
 }
 
+/// The response from a LanguageProvider, either a text reply or tool call requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderResponse {
-    pub message: Message,
+pub enum ProviderResponse {
+    Text { content: String },
+    ToolCalls { calls: Vec<crate::message::ToolCall> },
 }
 
 pub trait LanguageProvider {
@@ -41,5 +53,21 @@ pub trait LanguageProvider {
 
     fn model(&self) -> &str;
 
+    /// Non-streaming completion.
     fn complete(&self, request: ProviderRequest) -> Result<ProviderResponse>;
+
+    /// Streaming completion: calls `on_token` for each text delta.
+    /// Returns the final response (text or tool calls).
+    /// Default implementation falls back to non-streaming `complete`.
+    fn complete_streaming(
+        &self,
+        request: ProviderRequest,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<ProviderResponse> {
+        let response = self.complete(request)?;
+        if let ProviderResponse::Text { ref content } = response {
+            on_token(content);
+        }
+        Ok(response)
+    }
 }

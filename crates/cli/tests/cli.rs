@@ -34,6 +34,9 @@ model = "mock-model"
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_rust-codingagent"))
+        .env_remove("RUST_CODINGAGENT_PROVIDER")
+        .env_remove("RUST_CODINGAGENT_MODEL")
+        .env_remove("RUST_CODINGAGENT_API_KEY")
         .args(["--config", config_path.to_str().unwrap(), "config"])
         .output()
         .unwrap();
@@ -59,14 +62,13 @@ fn run_command_enters_main_loop() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"ping\nexit\n")
+        .write_all(b"exit\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("rust-codingagent started"));
-    assert!(stdout.contains("received: ping"));
+    assert!(stdout.contains("NKU Rust Coding Agent"));
     assert!(stdout.contains("bye"));
 }
 

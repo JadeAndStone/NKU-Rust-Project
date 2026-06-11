@@ -2,69 +2,19 @@
 
 # NKU Rust Coding Agent
 
-用 Rust 实现的命令行 Coding Agent 底座：从会话持久化、文件工具调用到代码修改回滚，先把 Agent 在 CLI 场景中最关键的工程链路跑通。
+用 Rust 实现的命令行 Coding Agent，支持多轮 LLM 推理、工具调度、文件操作回滚及会话管理。
 
 ![Rust](https://img.shields.io/badge/Rust-2021-b7410e?logo=rust&logoColor=white)
 ![Cargo Workspace](https://img.shields.io/badge/Cargo-workspace-4b5563)
-![CLI](https://img.shields.io/badge/CLI-clap-2563eb)
+![CLI](https://img.shields.io/badge/CLI-rustyline-2563eb)
 ![License](https://img.shields.io/badge/License-MIT-blue)
-![Status](https://img.shields.io/badge/Status-CLI%20%7C%20Core%20%7C%20Tools%20%7C%20Rollback-green)
+![Status](https://img.shields.io/badge/Status-Complete-brightgreen)
 
 </div>
 
 ## 📖 项目简介
 
-`NKU Rust Coding Agent` 是一个面向课程展示和后续扩展的 Rust 版 Agent CLI 项目。它不追求一次性做完完整智能编程助手，而是先把 CLI Agent 的底层能力拆清楚：命令入口、配置加载、会话状态、工具协议、文件操作和代码回滚。
-
-当前版本已经实现四个核心层：
-
-- `cli`：命令行入口、配置合并、REPL 主循环。
-- `core`：会话、消息、Provider 抽象和本地状态持久化。
-- `tools`：文件读取、写入、编辑、搜索和 shell 执行。
-- `rollback`：对 `Write` / `Edit` 工具调用自动记录快照、diff，并支持预览和恢复。
-
-真实 LLM provider 和完整 Agent 工具调度还没有接入，但现有 crate 边界已经为后续扩展留出了清晰位置。
-
-## 📸 项目一览
-
-| 回滚演示 |
-| --- |
-| ![成员 D 回滚功能演示](docs/assets/member-d-rollback-demo-screenshot.png) |
-| 通过 `Write` 新建文件，再通过 `Edit` 修改内容；回滚模块记录修改前后快照和 diff，随后恢复旧内容并删除本次新建文件。 |
-
-## 🔁 核心流程
-
-```text
-用户输入
-  |
-  v
-CLI / REPL 读取配置并接收命令
-  |
-  v
-Core 创建或恢复 Session，维护消息历史和 AgentContext
-  |
-  v
-Provider 后续生成回复或工具调用计划
-  |
-  v
-Tools 执行读写、编辑、搜索、命令
-  |
-  v
-Rollback 记录 Write/Edit 快照，支持预览和恢复
-```
-
-当前已经打通的是 `cli -> core`、`core -> tools` 的基础接口，以及 `rollback -> tools` 的包装式工具调用。后续只需要把真实 provider 和工具调度层接进来，就能形成完整 Agent 闭环。
-
-## ✨ 核心亮点
-
-| 能力 | 已实现内容 |
-| --- | --- |
-| 🧭 CLI 骨架 | 使用 `clap` 提供 `run`、`config`、`--help`、`--config <FILE>`，默认进入 REPL 主循环。 |
-| 🗂️ 会话持久化 | 使用 `.rust-codingagent/` 保存 active session、消息历史、profile、workspace 和模型配置。 |
-| 🧩 Provider 抽象 | 定义 `LanguageProvider`、`ProviderRequest`、`ProviderResponse`，不把项目绑定到某个具体模型服务。 |
-| 🛠️ 工具协议 | 用 `ToolRequest` / `ToolOutput` 统一 Read、Write、Edit、Grep、Shell 的输入输出。 |
-| 🔒 路径保护 | 工具层会 canonicalize workspace，拒绝默认读写工作区外文件。 |
-| ↩️ 回滚创新 | `RollbackManager` 包装 `Write` / `Edit`，记录 before/after snapshot、diff、changed files，并支持 `preview`、`restore`、`restore_file`。 |
+`NKU Rust Coding Agent` 是一个完整的 CLI 编码助手。用户输入自然语言，Agent 自动调用 LLM 进行多轮推理，按需执行文件读写、代码搜索、Shell 命令、PDF/DOCX 文档提取等工具，所有文件修改自动记录快照并支持一键回滚。
 
 ## 🧱 模块结构
 
@@ -74,10 +24,13 @@ NKU-Rust-Project/
 ├── README.md
 ├── LICENSE
 ├── crates/
-│   ├── cli/          # 命令行入口、配置加载、REPL
-│   ├── core/         # Session、Message、Provider trait、AgentContext、SessionStore
-│   ├── tools/        # Read / Write / Edit / Grep / Shell
-│   └── rollback/     # 快照、diff、回滚预览和恢复
+│   ├── cli/               # 命令行入口、配置加载、REPL 主循环
+│   ├── core/              # Session、Message、Provider trait、AgentContext、SessionStore
+│   ├── tools/             # Read / Write / Edit / Grep / Shell（workspace 路径保护）
+│   ├── tools-doc/         # PDF / DOCX 文本提取
+│   ├── rollback/          # 快照、diff、回滚预览和恢复
+│   ├── agent/             # Agent 多轮调度循环、工具调用、上下文管理
+│   └── provider-remote/   # DeepSeek / OpenAI-compatible HTTP + SSE 流式 Provider
 ├── docs/
 │   ├── 1-handoff.md
 │   ├── 2-core-handoff.md
@@ -88,74 +41,145 @@ NKU-Rust-Project/
     └── integration/
 ```
 
+## 🔁 核心流程
+
+```text
+你> 帮我读一下 Cargo.toml
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  CLI / rustyline REPL                   │
+│  ⏳ 思考中... → ⏳ 1.2s                  │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│  Agent 调度循环                          │
+│  user → Provider(LLM) → text? → 输出    │
+│                       → tool_calls?     │
+│                       → 执行工具        │
+│                       → rollback 记录   │
+│                       → 回传结果        │
+│                       → 继续循环 ↩      │
+└──────┬───────────────┬─────────────────┘
+       │               │
+       ▼               ▼
+┌──────────────┐ ┌──────────────────────┐
+│  Provider    │ │  ToolExecutor         │
+│  DeepSeek    │ │  read / write / edit  │
+│  HTTP + SSE  │ │  grep / shell         │
+│  流式输出    │ │  read_pdf / read_docx │
+└──────────────┘ └──────────┬───────────┘
+                            │
+                            ▼
+                   ┌──────────────────┐
+                   │  RollbackManager │
+                   │  快照 → 预览 → 恢复 │
+                   └──────────────────┘
+```
+
+## ✨ 核心功能
+
+| 能力 | 说明 |
+| --- | --- |
+| 🧠 多轮 LLM 推理 | Agent 调度循环，自动多轮 tool-calling 直到获取文本回复 |
+| 🛠️ 7 种工具 | read、write、edit、grep、shell、read_pdf、read_docx |
+| 📄 文档提取 | 支持 PDF/DOCX 文本提取，可读取 workspace 外部文件 |
+| ↩️ 文件回滚 | Write/Edit 自动记录快照，支持预览 diff、按步骤恢复、按文件恢复 |
+| 💬 流式输出 | SSE token 级实时输出，⏳ 思考计时 |
+| 🗂️ 会话管理 | 多 session 切换、历史恢复、/clear 新对话、上下文窗口自动截断 |
+| ⌨️ rustyline 输入 | 光标移动、↑↓ 历史、Tab 补全、历史持久化 |
+| 🎨 可视化反馈 | 工具调用图标 + 灰底亮字、文件修改提示、回滚 ID |
+| 🔒 路径保护 | Write/Edit 仅限 workspace 内，Read/Grep/PDF/DOCX 支持任意路径 |
+
 ## 🛠️ 技术栈
 
 | 分类 | 技术 |
 | --- | --- |
-| 语言与构建 | Rust 2021, Cargo workspace |
-| CLI | `clap` |
+| 语言与构建 | Rust 2021, Cargo workspace (7 crates) |
+| CLI 输入 | `rustyline`（光标、历史、补全） |
+| HTTP 客户端 | `reqwest` + `tokio` |
+| LLM 协议 | OpenAI-compatible `/v1/chat/completions` + SSE streaming |
 | 配置与持久化 | `serde`, `toml` |
+| 文档解析 | `pdf-extract`, `zip`, `quick-xml` |
+| 文件搜索 | `regex`, `walkdir` |
 | 日志 | `tracing`, `tracing-subscriber` |
-| 文件搜索 | `regex`, `ignore` |
-| 路径处理 | `dunce` |
 | 错误处理 | `anyhow` |
 
 ## 🚀 快速启动
 
 ### 1. 编译
 
-```powershell
+```bash
 cargo build --workspace
 ```
 
-### 2. 查看帮助
+### 2. 设置 API Key
 
-```powershell
-cargo run -- --help
+```bash
+export RUST_CODINGAGENT_API_KEY="sk-your-key"
+export RUST_CODINGAGENT_PROVIDER="deepseek"       # 可选，默认 deepseek
+export RUST_CODINGAGENT_MODEL="deepseek-chat"      # 可选，默认 deepseek-chat
 ```
 
-当前命令：
+也支持配置文件 `rust-codingagent.toml`：
 
-| 命令 | 作用 |
-| --- | --- |
-| `cargo run -- run` | 启动 Agent REPL |
-| `cargo run -- config` | 打印最终生效配置 |
-| `cargo run -- --help` | 查看 CLI 帮助 |
+```toml
+profile = "default"
+workspace = "/home/you/workspace"
+log_level = "info"
 
-### 3. 启动 REPL
+[provider]
+name = "deepseek"
+model = "deepseek-chat"
+api_base = "https://api.deepseek.com/v1"
+api_key = "sk-your-key"
+```
 
-```powershell
+环境变量优先级高于配置文件。
+
+### 3. 启动
+
+```bash
 cargo run -- run
 ```
 
-可以输入：
+进入 REPL 后直接输入自然语言即可。Agent 会自动调用工具完成任务。
 
 ```text
-hello
-/session
-/history
-/model better-model
-exit
+你> 帮我读一下 Cargo.toml
+⏳ 思考中...
+⏳ 1.3s
+
+ 📖 TOOL: 读取 Cargo.toml
+ ✅ File read: Cargo.toml (257 bytes)
+
+这是一个 Cargo workspace 配置，包含 7 个 crate...
+── 1 个工具执行完毕 ──
 ```
 
-普通输入目前会生成占位回复：
+### 4. REPL 命令
 
-```text
-received: hello
-```
+| 命令 | 作用 |
+| --- | --- |
+| `/help` | 查看所有命令 |
+| `/session` | 当前会话信息 |
+| `/sessions` | 列出所有历史会话 |
+| `/session resume <id>` | 切换到指定会话 |
+| `/history` | 查看消息历史 |
+| `/model [name]` | 查看/切换模型 |
+| `/clear` | 开启新对话 |
+| `/tools` | 列出可用工具 |
+| `/rollback list` | 列出所有回滚记录 |
+| `/rollback preview <id>` | 预览回滚 diff |
+| `/rollback apply <id>` | 执行回滚恢复 |
+| `/rollback file <id> <path>` | 恢复单个文件 |
+| `exit` / `quit` | 退出 |
 
-这表示 REPL 和 session 持久化已经打通，不表示真实 LLM 已接入。
+### 5. 查看配置
 
-### 4. 查看配置
-
-```powershell
-cargo run -- config
-```
-
-配置优先级：
-
-```text
-默认值 < rust-codingagent.toml < --config 指定文件 < 环境变量
+```bash
+cargo run -- config    # 打印最终生效配置
 ```
 
 支持的环境变量：
@@ -163,46 +187,39 @@ cargo run -- config
 | 变量名 | 作用 |
 | --- | --- |
 | `RUST_CODINGAGENT_PROFILE` | 当前 profile |
-| `RUST_CODINGAGENT_WORKSPACE` | 工作区路径 |
+| `RUST_CODINGAGENT_WORKSPACE` | 工作区路径（默认 `~/workspace`） |
 | `RUST_CODINGAGENT_LOG_LEVEL` | 日志等级 |
 | `RUST_CODINGAGENT_PROVIDER` | Provider 名称 |
 | `RUST_CODINGAGENT_MODEL` | 模型名称 |
 | `RUST_CODINGAGENT_API_BASE` | Provider API 地址 |
+| `RUST_CODINGAGENT_API_KEY` | API Key |
 
 ## 🧪 验证
 
-提交前建议运行：
-
-```powershell
+```bash
 cargo fmt --all -- --check
 cargo test --all
 cargo build --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-当前测试覆盖：
+当前测试覆盖（共 19 个）：
 
-| crate | 覆盖重点 |
-| --- | --- |
-| `cli` | 配置读取、REPL 启动、退出、历史持久化、模型切换、CLI 集成命令 |
-| `core` | session 保存、恢复、列表排序 |
-| `tools` | Read / Write / Edit / Grep / Shell、覆盖保护、路径越界拒绝 |
-| `rollback` | Write/Edit 回滚记录、预览、恢复、单文件恢复、Read 不记录 |
-
-## 📚 文档入口
-
-| 文档 | 内容 |
-| --- | --- |
-| [docs/1-handoff.md](docs/1-handoff.md) | CLI 骨架交接说明 |
-| [docs/2-core-handoff.md](docs/2-core-handoff.md) | core 会话层接口与对接说明 |
-| [docs/3-tools-handoff.md](docs/3-tools-handoff.md) | tools 工具层接口与行为说明 |
-| [docs/4-rollback-handoff.md](docs/4-rollback-handoff.md) | rollback 模块、快照、diff、恢复流程说明 |
+| crate | 测试数 | 覆盖重点 |
+| --- | --- | --- |
+| `cli` | 3 | 配置读取、REPL 启动退出、历史持久化、模型切换 |
+| `core` | 2 | session 保存恢复、列表排序 |
+| `tools` | 6 | Read/Write/Edit/Grep/Shell、覆盖保护、路径越界拒绝 |
+| `tools-doc` | 1 | DOCX 文本提取 |
+| `rollback` | 4 | Write/Edit 回滚记录、预览、恢复、单文件恢复、Read 不记录 |
+| `agent` | 0 | （调度循环通过集成测试覆盖） |
+| `provider-remote` | 0 | （HTTP/SSE 需真实 API 环境） |
 
 ## 👥 开发团队
 
-| 成员 | 负责方向 | 当前交付 |
+| 成员 | 负责方向 | 主要交付 |
 | --- | --- | --- |
-| 成员 A | CLI 与工程骨架 | 启动入口、命令解析、配置加载、日志和最小主循环 |
+| 成员 A | CLI 工程与系统集成 | Agent 多轮调度循环（LLM ↔ tool_call ↔ 执行 → 循环），串联为完整 Agent。启动入口、命令解析、配置加载、日志、REPL；RemoteProvider（HTTP/SSE）；rustyline 交互（光标/历史/补全/⏳ 计时/工具反馈）；回滚命令与会话管理；tools-doc；上下文管理；7 crate 整合联调 |
 | 成员 B | 核心状态与会话 | session、message、history、provider trait、AgentContext、SessionStore |
 | 成员 C | 基础工具层 | Read、Write、Edit、Grep、Shell、workspace 路径保护 |
 | 成员 D | 版本回滚创新 | 快照、diff、回滚预览、按步骤恢复、按文件恢复、本地持久化 |
@@ -210,11 +227,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ## 📌 项目说明
 
-- `.rust-codingagent/` 是本地运行状态目录，已加入 `.gitignore`，不会提交到仓库。
-- 当前没有真实 LLM provider，`LanguageProvider` 只是抽象接口。
-- rollback 核心库已经完成，但还没有做成用户可见的 `/rollback` REPL 命令。
-- `ShellTool` 可能产生复杂副作用，当前 rollback 不自动记录 shell 修改。
-- 回滚 diff 是轻量级文本 diff，适合 CLI 预览和课程展示，不等同于完整 git patch。
+- `.rust-codingagent/` 是本地运行状态目录，已加入 `.gitignore`。
+- 默认 workspace 为 `~/workspace`（如存在），否则为当前目录。
+- 回滚记录存储为 TOML 文件，无数量限制；`/rollback list` 可查看，`/rollback apply` 可恢复。
+- `read`/`read_pdf`/`read_docx`/`grep` 可访问 workspace 外路径；`write`/`edit` 仅限 workspace 内。
+- Shell 命令默认 15 秒超时，`find /` 会被拦截提示。
 
 ## 📄 License
 
@@ -222,6 +239,6 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 <div align="center">
 
-Rust CLI Agent 的底座已经搭好，下一步就是把模型调度、工具调用和回滚交互真正串成完整链路。
+Rust CLI Coding Agent — 从会话持久化到 LLM 多轮推理，完整的编码助手底座。
 
 </div>

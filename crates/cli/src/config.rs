@@ -20,6 +20,7 @@ pub struct ProviderConfig {
     pub name: String,
     pub model: String,
     pub api_base: Option<String>,
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -35,6 +36,7 @@ struct PartialProviderConfig {
     name: Option<String>,
     model: Option<String>,
     api_base: Option<String>,
+    api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -73,6 +75,9 @@ impl AppConfig {
             if provider.api_base.is_some() {
                 self.provider.api_base = provider.api_base;
             }
+            if provider.api_key.is_some() {
+                self.provider.api_key = provider.api_key;
+            }
         }
     }
 
@@ -95,19 +100,35 @@ impl AppConfig {
         if let Ok(api_base) = env::var("RUST_CODINGAGENT_API_BASE") {
             self.provider.api_base = Some(api_base);
         }
+        if let Ok(api_key) = env::var("RUST_CODINGAGENT_API_KEY") {
+            self.provider.api_key = Some(api_key);
+        }
     }
+}
+
+fn default_workspace() -> PathBuf {
+    // Use ~/workspace if it exists (user project directory),
+    // otherwise fall back to current directory.
+    if let Ok(home) = env::var("HOME") {
+        let ws = PathBuf::from(&home).join("workspace");
+        if ws.exists() {
+            return ws;
+        }
+    }
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             profile: "default".to_string(),
-            workspace: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace: default_workspace(),
             log_level: "info".to_string(),
             provider: ProviderConfig {
                 name: "local".to_string(),
                 model: "stub".to_string(),
                 api_base: None,
+                api_key: None,
             },
         }
     }
@@ -143,6 +164,14 @@ mod tests {
 
     #[test]
     fn loads_partial_toml_config() {
+        // Save and clear env vars that might interfere
+        let saved_provider = env::var("RUST_CODINGAGENT_PROVIDER").ok();
+        let saved_model = env::var("RUST_CODINGAGENT_MODEL").ok();
+        let saved_api_key = env::var("RUST_CODINGAGENT_API_KEY").ok();
+        env::remove_var("RUST_CODINGAGENT_PROVIDER");
+        env::remove_var("RUST_CODINGAGENT_MODEL");
+        env::remove_var("RUST_CODINGAGENT_API_KEY");
+
         let dir = env::temp_dir().join(unique_name("rust-codingagent-config-test"));
         fs::create_dir_all(&dir).unwrap();
         let config_path = dir.join("agent.toml");
@@ -172,6 +201,11 @@ model = "demo-model"
         assert_eq!(config.provider.model, "demo-model");
 
         fs::remove_dir_all(&dir).unwrap();
+
+        // Restore env vars
+        if let Some(v) = saved_provider { env::set_var("RUST_CODINGAGENT_PROVIDER", v); }
+        if let Some(v) = saved_model { env::set_var("RUST_CODINGAGENT_MODEL", v); }
+        if let Some(v) = saved_api_key { env::set_var("RUST_CODINGAGENT_API_KEY", v); }
     }
 
     fn unique_name(prefix: &str) -> String {

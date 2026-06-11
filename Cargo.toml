@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cli", "crates/core", "crates/tools", "crates/rollback"]
+members = ["crates/cli", "crates/core", "crates/tools", "crates/rollback", "crates/provider-remote", "crates/agent", "crates/tools-doc"]
 default-members = ["crates/cli"]
 resolver = "2"
 

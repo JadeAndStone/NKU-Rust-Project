@@ -1,0 +1,16 @@
+[package]
+name = "rust-codingagent-provider-remote"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3"
+rust-codingagent-core = { path = "../core" }
+tracing = "0.1"

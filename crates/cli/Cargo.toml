@@ -12,7 +12,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+rustyline = { version = "13", features = ["derive"] }
 rust-codingagent-core = { path = "../core" }
+rust-codingagent-agent = { path = "../agent" }
+rust-codingagent-provider-remote = { path = "../provider-remote" }
+rust-codingagent-rollback = { path = "../rollback" }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"
