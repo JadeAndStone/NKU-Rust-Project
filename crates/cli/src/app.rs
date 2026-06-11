@@ -1,7 +1,13 @@
+use std::borrow::Cow;
 use std::io::{self, BufRead, Write};
 
 use anyhow::Result;
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::Helper;
 use rustyline::{CompletionType, Config, Editor};
 use tracing::info;
 
@@ -24,7 +30,8 @@ impl App {
         let config = Config::builder()
             .completion_type(CompletionType::Circular)
             .build();
-        let mut editor = Editor::<(), DefaultHistory>::with_config(config)?;
+        let mut editor = Editor::<PromptHelper, DefaultHistory>::with_config(config)?;
+        editor.set_helper(Some(PromptHelper));
 
         let history_path = dirs_home().join(HISTORY_FILE);
         let _ = editor.load_history(&history_path);
@@ -39,7 +46,7 @@ impl App {
         loop_runner.print_banner(&mut io::stdout().lock())?;
 
         loop {
-            let readline = editor.readline("\x1b[1;36m你\x1b[0m> ");
+            let readline = editor.readline("你> ");
             match readline {
                 Ok(line) => {
                     let input = line.trim();
@@ -54,7 +61,8 @@ impl App {
                     }
 
                     if input.starts_with('/') {
-                        if let Err(e) = loop_runner.handle_command(input, &mut io::stdout().lock()) {
+                        if let Err(e) = loop_runner.handle_command(input, &mut io::stdout().lock())
+                        {
                             eprintln!("\x1b[31merror: {e:#}\x1b[0m");
                         }
                         continue;
@@ -110,4 +118,32 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+struct PromptHelper;
+
+impl Helper for PromptHelper {}
+
+impl Completer for PromptHelper {
+    type Candidate = Pair;
+}
+
+impl Hinter for PromptHelper {
+    type Hint = String;
+}
+
+impl Validator for PromptHelper {}
+
+impl Highlighter for PromptHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        default: bool,
+    ) -> Cow<'b, str> {
+        if default {
+            Cow::Owned(format!("\x1b[1;36m{prompt}\x1b[0m"))
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
 }

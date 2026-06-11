@@ -88,8 +88,11 @@ pub(crate) fn run(
 
 #[cfg(windows)]
 fn shell_command(command: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+
     let mut shell = Command::new("cmd");
-    shell.args(["/C", command]);
+    shell.args(["/D", "/S", "/C"]);
+    shell.raw_arg(command);
     shell
 }
 

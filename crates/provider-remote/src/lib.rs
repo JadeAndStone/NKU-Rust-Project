@@ -405,9 +405,9 @@ async fn parse_sse_stream(
     let mut buffer = String::new();
 
     // Accumulated tool call info keyed by index (support multiple parallel tool calls)
-    let mut tc_id: Vec<Option<String>> = Vec::new();    // [idx] = id
-    let mut tc_name: Vec<Option<String>> = Vec::new();  // [idx] = name
-    let mut tc_args: Vec<String> = Vec::new();           // [idx] = accumulated arguments
+    let mut tc_id: Vec<Option<String>> = Vec::new(); // [idx] = id
+    let mut tc_name: Vec<Option<String>> = Vec::new(); // [idx] = name
+    let mut tc_args: Vec<String> = Vec::new(); // [idx] = accumulated arguments
     let mut text_content = String::new();
 
     while let Some(chunk_result) = stream.next().await {
@@ -446,9 +446,15 @@ async fn parse_sse_stream(
                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                     for tc_delta in tool_calls {
                         let idx = tc_delta.index as usize;
-                        while tc_id.len() <= idx { tc_id.push(None); }
-                        while tc_name.len() <= idx { tc_name.push(None); }
-                        while tc_args.len() <= idx { tc_args.push(String::new()); }
+                        while tc_id.len() <= idx {
+                            tc_id.push(None);
+                        }
+                        while tc_name.len() <= idx {
+                            tc_name.push(None);
+                        }
+                        while tc_args.len() <= idx {
+                            tc_args.push(String::new());
+                        }
                         if let Some(ref id) = tc_delta.id {
                             tc_id[idx] = Some(id.clone());
                         }
@@ -475,21 +481,34 @@ fn finalize_stream(
     tc_args: Vec<String>,
     text_content: String,
 ) -> Result<ProviderResponse> {
-    let calls: Vec<ToolCall> = tc_id.iter()
+    let calls: Vec<ToolCall> = tc_id
+        .iter()
         .zip(tc_name.iter())
         .zip(tc_args.iter())
         .filter_map(|((id, name), args)| {
             if let (Some(id), Some(name)) = (id, name) {
-                let arguments = if args.is_empty() { "{}".to_string() } else { args.clone() };
-                Some(ToolCall { id: id.clone(), name: name.clone(), arguments })
-            } else { None }
+                let arguments = if args.is_empty() {
+                    "{}".to_string()
+                } else {
+                    args.clone()
+                };
+                Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments,
+                })
+            } else {
+                None
+            }
         })
         .collect();
 
     if !calls.is_empty() {
         Ok(ProviderResponse::ToolCalls { calls })
     } else if !text_content.is_empty() {
-        Ok(ProviderResponse::Text { content: text_content })
+        Ok(ProviderResponse::Text {
+            content: text_content,
+        })
     } else {
         bail!("LLM streaming response ended without content or tool calls");
     }

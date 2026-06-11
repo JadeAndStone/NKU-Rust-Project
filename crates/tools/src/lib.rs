@@ -229,6 +229,40 @@ mod tests {
         remove_workspace(&workspace);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn shell_handles_quoted_unicode_windows_paths() {
+        let workspace = temp_workspace("tools-shell-中文");
+        let context = context_for(&workspace);
+        let target = workspace.join("子目录");
+
+        let output = run_tool(
+            &context,
+            ToolRequest::Shell {
+                command: format!("mkdir \"{}\"", target.display()),
+                timeout_ms: Some(5_000),
+                max_output_bytes: Some(1024),
+            },
+        )
+        .unwrap();
+
+        let ToolOutput::Shell {
+            status_code,
+            stderr,
+            timed_out,
+            ..
+        } = output
+        else {
+            panic!("expected shell output");
+        };
+
+        assert_eq!(status_code, Some(0), "{stderr}");
+        assert!(!timed_out);
+        assert!(target.exists());
+
+        remove_workspace(&workspace);
+    }
+
     fn context_for(workspace: &Path) -> AgentContext {
         AgentContext {
             session_id: "test-session".to_string(),

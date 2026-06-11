@@ -16,8 +16,8 @@ use rust_codingagent_core::{
     SessionStore, ToolDefinition,
 };
 use rust_codingagent_rollback::RollbackManager;
-use rust_codingagent_tools_doc;
 use rust_codingagent_tools::{ToolOutput, ToolRequest};
+use rust_codingagent_tools_doc;
 use serde_json::Value;
 use tracing::info;
 use walkdir::WalkDir;
@@ -110,14 +110,13 @@ impl<'a> Agent<'a> {
                     // Execute tools first, collect results in memory
                     let mut results: Vec<(String, String)> = Vec::new();
                     for call in &calls {
-                        let result_text = match execute_tool_call(
-                            &call.name,
-                            &call.arguments,
-                            self.rollback,
-                        ) {
-                            Ok(text) => text,
-                            Err(e) => format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。"),
-                        };
+                        let result_text =
+                            match execute_tool_call(&call.name, &call.arguments, self.rollback) {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。")
+                                }
+                            };
                         results.push((call.id.clone(), result_text));
                     }
 
@@ -135,7 +134,8 @@ impl<'a> Agent<'a> {
                         core_calls,
                     ));
                     for (call_id, result_text) in results {
-                        self.session.add_message(Message::tool_result(result_text, &call_id));
+                        self.session
+                            .add_message(Message::tool_result(result_text, &call_id));
                     }
                     self.store.save_session(self.session)?;
                 }
@@ -162,9 +162,7 @@ impl<'a> Agent<'a> {
         loop {
             round += 1;
             if round > MAX_TOOL_ROUNDS {
-                bail!(
-                    "agent exceeded maximum tool-call rounds ({MAX_TOOL_ROUNDS})"
-                );
+                bail!("agent exceeded maximum tool-call rounds ({MAX_TOOL_ROUNDS})");
             }
 
             let request = self.build_request();
@@ -184,14 +182,13 @@ impl<'a> Agent<'a> {
                     for call in &calls {
                         let desc = tool_description(&call.name, &call.arguments);
                         on_tool(&call.name, &desc);
-                        let result_text = match execute_tool_call(
-                            &call.name,
-                            &call.arguments,
-                            self.rollback,
-                        ) {
-                            Ok(text) => text,
-                            Err(e) => format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。"),
-                        };
+                        let result_text =
+                            match execute_tool_call(&call.name, &call.arguments, self.rollback) {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。")
+                                }
+                            };
                         let done = tool_done_message(&call.name, &result_text, self.rollback);
                         on_tool_done(&call.name, &done);
                         results.push((call.id.clone(), result_text));
@@ -211,7 +208,8 @@ impl<'a> Agent<'a> {
                         core_calls,
                     ));
                     for (call_id, result_text) in results {
-                        self.session.add_message(Message::tool_result(result_text, &call_id));
+                        self.session
+                            .add_message(Message::tool_result(result_text, &call_id));
                     }
                     self.store.save_session(self.session)?;
                 }
@@ -399,8 +397,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
 
 /// Parse an LLM function-call (name + JSON arguments) into a ToolRequest.
 fn parse_tool_request(name: &str, arguments: &str) -> Result<ToolRequest> {
-    let args: Value =
-        parse_json_robust(arguments)?;
+    let args: Value = parse_json_robust(arguments)?;
 
     match name {
         "read" => {
@@ -455,9 +452,7 @@ fn parse_tool_request(name: &str, arguments: &str) -> Result<ToolRequest> {
         }
         "shell" => {
             let command = get_string(&args, "command")?;
-            let timeout_ms = args
-                .get("timeout_ms")
-                .and_then(|v| v.as_u64());
+            let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64());
             let max_output_bytes = args
                 .get("max_output_bytes")
                 .and_then(|v| v.as_u64())
@@ -479,11 +474,7 @@ fn parse_tool_request(name: &str, arguments: &str) -> Result<ToolRequest> {
 /// `read_pdf` and `read_docx` are handled directly by the tools-doc crate
 /// and can read files from any path (not restricted to workspace).
 /// Other tools go through the standard tools + rollback pipeline.
-fn execute_tool_call(
-    name: &str,
-    arguments: &str,
-    rollback: &RollbackManager,
-) -> Result<String> {
+fn execute_tool_call(name: &str, arguments: &str, rollback: &RollbackManager) -> Result<String> {
     match name {
         "read_pdf" => {
             let args: Value = parse_json_robust(arguments)?;
@@ -513,7 +504,10 @@ fn execute_tool_call(
                     // Help LLM fix path: try common alternatives
                     let p = std::path::Path::new(&path);
                     let suggestions = if !p.exists() {
-                        let parent = p.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                        let parent = p
+                            .parent()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_default();
                         let mut hints = vec![format!("文件不存在: {path}")];
                         // Try listing parent directory
                         if let Ok(entries) = std::fs::read_dir(&parent) {
@@ -533,48 +527,90 @@ fn execute_tool_call(
                     anyhow::bail!("{suggestions}");
                 }
             };
-            let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let max_bytes = args
+                .get("max_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let preview = if let Some(max) = max_bytes {
                 if content.len() > max {
                     let mut end = max;
-                    while end > 0 && !content.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     format!("{}...\n\n[truncated at {max} bytes]", &content[..end])
-                } else { content }
-            } else { content };
+                } else {
+                    content
+                }
+            } else {
+                content
+            };
             Ok(preview)
         }
         "grep" => {
             let args: Value = parse_json_robust(arguments)?;
             let pattern = get_string(&args, "pattern")?;
             let search_path = args.get("path").and_then(|v| v.as_str()).map(PathBuf::from);
-            let max_matches = args.get("max_matches").and_then(|v| v.as_u64())
-                .map(|v| v as usize).unwrap_or(50);
-            let re = Regex::new(&pattern)
-                .with_context(|| format!("invalid regex: {pattern}"))?;
+            let max_matches = args
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(50);
+            let re = Regex::new(&pattern).with_context(|| format!("invalid regex: {pattern}"))?;
             let mut results: Vec<String> = Vec::new();
             let root = search_path.unwrap_or_else(|| PathBuf::from("."));
             if root.is_file() {
                 let content = std::fs::read_to_string(&root)?;
                 for (i, line) in content.lines().enumerate() {
                     if let Some(m) = re.find(line) {
-                        results.push(format!("{}:{}:{}: {}", root.display(), i+1, m.start()+1, line));
-                        if results.len() >= max_matches { break; }
+                        results.push(format!(
+                            "{}:{}:{}: {}",
+                            root.display(),
+                            i + 1,
+                            m.start() + 1,
+                            line
+                        ));
+                        if results.len() >= max_matches {
+                            break;
+                        }
                     }
                 }
             } else if root.is_dir() {
-                for entry in WalkDir::new(&root).max_depth(10)
-                    .follow_links(false).into_iter().flatten()
+                for entry in WalkDir::new(&root)
+                    .max_depth(10)
+                    .follow_links(false)
+                    .into_iter()
+                    .flatten()
                 {
-                    if !entry.file_type().is_file() { continue; }
-                    if entry.path().to_str().map_or(true, |p| p.contains("/.git/") || p.contains("/target/")) { continue; }
-                    let Ok(content) = std::fs::read_to_string(entry.path()) else { continue; };
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    if entry
+                        .path()
+                        .to_str()
+                        .map_or(true, |p| p.contains("/.git/") || p.contains("/target/"))
+                    {
+                        continue;
+                    }
+                    let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                        continue;
+                    };
                     for (i, line) in content.lines().enumerate() {
                         if let Some(m) = re.find(line) {
-                            results.push(format!("{}:{}:{}: {}", entry.path().display(), i+1, m.start()+1, line));
-                            if results.len() >= max_matches { break; }
+                            results.push(format!(
+                                "{}:{}:{}: {}",
+                                entry.path().display(),
+                                i + 1,
+                                m.start() + 1,
+                                line
+                            ));
+                            if results.len() >= max_matches {
+                                break;
+                            }
                         }
                     }
-                    if results.len() >= max_matches { break; }
+                    if results.len() >= max_matches {
+                        break;
+                    }
                 }
             }
             Ok(if results.is_empty() {
@@ -589,10 +625,15 @@ fn execute_tool_call(
                 Ok(req) => req,
                 Err(_) => {
                     let (path, content, overwrite) = extract_write_args_fallback(arguments)?;
-                    ToolRequest::Write { path: PathBuf::from(path), content, overwrite }
+                    ToolRequest::Write {
+                        path: PathBuf::from(path),
+                        content,
+                        overwrite,
+                    }
                 }
             };
-            let result = rollback.run_tool(tool_request)
+            let result = rollback
+                .run_tool(tool_request)
                 .with_context(|| "tool 'write' execution failed")?;
             Ok(format_tool_output(&result.output))
         }
@@ -600,23 +641,41 @@ fn execute_tool_call(
         "shell" => {
             let args: Value = parse_json_robust(arguments)?;
             let command = get_string(&args, "command")?;
-            if (command == "find /" || command.starts_with("find / ") || command.contains("| find /") || command.contains("find / -")) && !command.contains("-maxdepth") && !command.contains("/home") && !command.contains("/usr") && !command.contains("/opt") {
+            if (command == "find /"
+                || command.starts_with("find / ")
+                || command.contains("| find /")
+                || command.contains("find / -"))
+                && !command.contains("-maxdepth")
+                && !command.contains("/home")
+                && !command.contains("/usr")
+                && !command.contains("/opt")
+            {
                 return Ok(format!(
                     "⛔ 命令被拦截: 'find /' 会扫描整个文件系统，太慢。\n\
                     请改用具体目录: find /home/liuxuem/workspace -name '...' 等"
                 ));
             }
             let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64());
-            let max_output_bytes = args.get("max_output_bytes").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let tool_request = ToolRequest::Shell { command, timeout_ms, max_output_bytes };
-            let result = rollback.run_tool(tool_request)
+            let max_output_bytes = args
+                .get("max_output_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let tool_request = ToolRequest::Shell {
+                command,
+                timeout_ms,
+                max_output_bytes,
+            };
+            let result = rollback
+                .run_tool(tool_request)
                 .with_context(|| "shell execution failed")?;
             Ok(format_tool_output(&result.output))
         }
         _ => {
-            let tool_request = parse_tool_request(name, arguments)
-                .with_context(|| format!("failed to parse arguments for tool '{name}': {arguments}"))?;
-            let result = rollback.run_tool(tool_request)
+            let tool_request = parse_tool_request(name, arguments).with_context(|| {
+                format!("failed to parse arguments for tool '{name}': {arguments}")
+            })?;
+            let result = rollback
+                .run_tool(tool_request)
                 .with_context(|| format!("tool '{name}' execution failed"))?;
             Ok(format_tool_output(&result.output))
         }
@@ -633,7 +692,11 @@ fn format_preview(text: &str, kind: &str) -> String {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...\n\n[{kind} text extracted, {} total chars]", &text[..end], text.len())
+    format!(
+        "{}...\n\n[{kind} text extracted, {} total chars]",
+        &text[..end],
+        text.len()
+    )
 }
 
 /// Parse JSON from an LLM-generated arguments string, tolerating trailing text.
@@ -697,10 +760,20 @@ fn fix_json_strings(json: &str) -> String {
     let mut in_string = false;
     let mut escaped = false;
     for ch in json.chars() {
-        if escaped { escaped = false; out.push(ch); continue; }
+        if escaped {
+            escaped = false;
+            out.push(ch);
+            continue;
+        }
         match ch {
-            '\\' => { escaped = true; out.push(ch); }
-            '"' => { in_string = !in_string; out.push(ch); }
+            '\\' => {
+                escaped = true;
+                out.push(ch);
+            }
+            '"' => {
+                in_string = !in_string;
+                out.push(ch);
+            }
             '\n' if in_string => out.push_str("\\n"),
             '\r' if in_string => out.push_str("\\r"),
             '\t' if in_string => out.push_str("\\t"),
@@ -720,7 +793,8 @@ fn extract_write_args_fallback(arguments: &str) -> Result<(String, String, bool)
         .and_then(|s| s.trim().strip_prefix('"'))
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or("unknown.txt");
-    let overwrite = arguments.contains("\"overwrite\": true") || arguments.contains("\"overwrite\":true");
+    let overwrite =
+        arguments.contains("\"overwrite\": true") || arguments.contains("\"overwrite\":true");
     // Try to find content between "content": " and the next major key
     let content = arguments
         .split("\"content\": \"")
@@ -755,9 +829,7 @@ fn get_string(args: &Value, key: &str) -> Result<String> {
 fn format_tool_output(output: &ToolOutput) -> String {
     match output {
         ToolOutput::Read {
-            content,
-            truncated,
-            ..
+            content, truncated, ..
         } => {
             if *truncated {
                 format!("{content}\n\n[Note: output was truncated]")
@@ -778,7 +850,10 @@ fn format_tool_output(output: &ToolOutput) -> String {
             } else {
                 "written".to_string()
             };
-            format!("File {action}: {path} ({bytes} bytes)", path = path.display())
+            format!(
+                "File {action}: {path} ({bytes} bytes)",
+                path = path.display()
+            )
         }
         ToolOutput::Edit {
             path,
@@ -794,10 +869,7 @@ fn format_tool_output(output: &ToolOutput) -> String {
                 bytes_after
             )
         }
-        ToolOutput::Grep {
-            matches,
-            truncated,
-        } => {
+        ToolOutput::Grep { matches, truncated } => {
             if matches.is_empty() {
                 return "No matches found.".to_string();
             }
@@ -832,7 +904,9 @@ fn format_tool_output(output: &ToolOutput) -> String {
                 parts.push("Command timed out.".to_string());
             }
 
-            let exit = status_code.map(|c| c.to_string()).unwrap_or_else(|| "none".to_string());
+            let exit = status_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "none".to_string());
             parts.push(format!("Exit code: {exit}"));
 
             if !stdout.is_empty() {
@@ -861,21 +935,46 @@ fn format_tool_output(output: &ToolOutput) -> String {
 fn tool_description(name: &str, arguments: &str) -> String {
     let args: Value = parse_json_robust(arguments).unwrap_or_default();
     match name {
-        "read" => format!("读取 {}", args.get("path").and_then(|v| v.as_str()).unwrap_or("?")),
-        "read_pdf" => format!("提取PDF {}", args.get("path").and_then(|v| v.as_str()).unwrap_or("?")),
-        "read_docx" => format!("提取DOCX {}", args.get("path").and_then(|v| v.as_str()).unwrap_or("?")),
-        "write" => format!("写入 {}", args.get("path").and_then(|v| v.as_str()).unwrap_or("?")),
-        "edit" => format!("编辑 {}", args.get("path").and_then(|v| v.as_str()).unwrap_or("?")),
-        "grep" => format!("搜索 \"{}\"", args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?")),
-        "shell" => format!("执行 {}", args.get("command").and_then(|v| v.as_str()).unwrap_or("?")),
+        "read" => format!(
+            "读取 {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "read_pdf" => format!(
+            "提取PDF {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "read_docx" => format!(
+            "提取DOCX {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "write" => format!(
+            "写入 {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "edit" => format!(
+            "编辑 {}",
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "grep" => format!(
+            "搜索 \"{}\"",
+            args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
+        "shell" => format!(
+            "执行 {}",
+            args.get("command").and_then(|v| v.as_str()).unwrap_or("?")
+        ),
         other => format!("调用 {other}"),
     }
 }
 
 fn safe_truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { return s; }
+    if s.len() <= max {
+        return s;
+    }
     let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
     &s[..end]
 }
 
@@ -884,7 +983,8 @@ fn tool_done_message(name: &str, result: &str, rollback: &RollbackManager) -> St
     match name {
         "write" | "edit" => {
             let records = rollback.list_records().ok();
-            let last_id = records.as_ref()
+            let last_id = records
+                .as_ref()
                 .and_then(|r| r.last().map(|s| s.id.as_str()))
                 .unwrap_or("?");
             let truncated = safe_truncate(result, 80);
@@ -893,7 +993,9 @@ fn tool_done_message(name: &str, result: &str, rollback: &RollbackManager) -> St
         _ => {
             if result.len() > 100 {
                 let mut end = 100;
-                while end > 0 && !result.is_char_boundary(end) { end -= 1; }
+                while end > 0 && !result.is_char_boundary(end) {
+                    end -= 1;
+                }
                 format!("{}...", &result[..end])
             } else {
                 result.to_string()
@@ -1025,7 +1127,9 @@ pub fn build_messages_with_system(session: &Session) -> Vec<Message> {
         Some(Message::system(SYSTEM_PROMPT))
     };
 
-    let system_tokens = system_msg.as_ref().map_or(0, |m| estimate_message_tokens(m));
+    let system_tokens = system_msg
+        .as_ref()
+        .map_or(0, |m| estimate_message_tokens(m));
 
     // Build the full list, then truncate from the top if needed
     let mut full: Vec<Message> = if let Some(sys) = system_msg {
@@ -1045,7 +1149,11 @@ pub fn build_messages_with_system(session: &Session) -> Vec<Message> {
     // Truncate: keep system prompt (index 0), drop oldest non-system messages
     // until we're under the limit. Always keep at least the last 4 messages.
     let mut current_tokens: usize = full.iter().map(|m| estimate_message_tokens(m)).sum();
-    let remove_idx = if has_system || system_tokens > 0 { 1usize } else { 0usize };
+    let remove_idx = if has_system || system_tokens > 0 {
+        1usize
+    } else {
+        0usize
+    };
 
     while current_tokens > MAX_CONTEXT_TOKENS && remove_idx + 4 < full.len() {
         let removed = estimate_message_tokens(&full[remove_idx]);

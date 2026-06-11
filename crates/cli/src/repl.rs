@@ -37,8 +37,11 @@ impl<'a> MainLoop<'a> {
             model: provider.model().to_string(),
             api_base: config.provider.api_base.clone(),
         };
-        let session =
-            store.get_or_create_active_session(config.profile.clone(), config.workspace.clone(), core_provider)?;
+        let session = store.get_or_create_active_session(
+            config.profile.clone(),
+            config.workspace.clone(),
+            core_provider,
+        )?;
 
         let rollback_manager = RollbackManager::new(session.context())?;
 
@@ -54,25 +57,79 @@ impl<'a> MainLoop<'a> {
     // ── Main REPL loop ──────────────────────────────────────────────────
 
     pub fn print_banner<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writeln!(writer, "╔══════════════════════════════════════════════════════╗")?;
-        writeln!(writer, "║  NKU Rust Coding Agent                              ║")?;
-        writeln!(writer, "╠══════════════════════════════════════════════════════╣")?;
-        writeln!(writer, "║  workspace : {:<40}║", truncate_display(&self.config.workspace, 40))?;
-        writeln!(writer, "║  provider  : {}/{:<32}║", self.provider.name(), truncate_right(&self.provider.model(), 32))?;
+        writeln!(
+            writer,
+            "╔══════════════════════════════════════════════════════╗"
+        )?;
+        writeln!(
+            writer,
+            "║  NKU Rust Coding Agent                              ║"
+        )?;
+        writeln!(
+            writer,
+            "╠══════════════════════════════════════════════════════╣"
+        )?;
+        writeln!(
+            writer,
+            "║  workspace : {:<40}║",
+            truncate_display(&self.config.workspace, 40)
+        )?;
+        writeln!(
+            writer,
+            "║  provider  : {}/{:<32}║",
+            self.provider.name(),
+            truncate_right(&self.provider.model(), 32)
+        )?;
         if self.session.history.len() > 0 {
-            writeln!(writer, "║  session   : {} ({} messages){:<15}║", self.session.id, self.session.history.len(), "")?;
+            writeln!(
+                writer,
+                "║  session   : {} ({} messages){:<15}║",
+                self.session.id,
+                self.session.history.len(),
+                ""
+            )?;
         } else {
-            writeln!(writer, "║  session   : new                                    ║")?;
+            writeln!(
+                writer,
+                "║  session   : new                                    ║"
+            )?;
         }
-        writeln!(writer, "╠══════════════════════════════════════════════════════╣")?;
-        writeln!(writer, "║  输入自然语言，Agent 会调用工具帮你完成任务          ║")?;
-        writeln!(writer, "║                                                    ║")?;
-        writeln!(writer, "║  /help        查看所有命令                          ║")?;
-        writeln!(writer, "║  /sessions    查看历史对话，/session resume <id> 切换║")?;
-        writeln!(writer, "║  /clear       开启新对话                            ║")?;
-        writeln!(writer, "║  /rollback    回滚文件修改                          ║")?;
-        writeln!(writer, "║  exit         退出                                  ║")?;
-        writeln!(writer, "╚══════════════════════════════════════════════════════╝")?;
+        writeln!(
+            writer,
+            "╠══════════════════════════════════════════════════════╣"
+        )?;
+        writeln!(
+            writer,
+            "║  输入自然语言，Agent 会调用工具帮你完成任务          ║"
+        )?;
+        writeln!(
+            writer,
+            "║                                                    ║"
+        )?;
+        writeln!(
+            writer,
+            "║  /help        查看所有命令                          ║"
+        )?;
+        writeln!(
+            writer,
+            "║  /sessions    查看历史对话，/session resume <id> 切换║"
+        )?;
+        writeln!(
+            writer,
+            "║  /clear       开启新对话                            ║"
+        )?;
+        writeln!(
+            writer,
+            "║  /rollback    回滚文件修改                          ║"
+        )?;
+        writeln!(
+            writer,
+            "║  exit         退出                                  ║"
+        )?;
+        writeln!(
+            writer,
+            "╚══════════════════════════════════════════════════════╝"
+        )?;
         Ok(())
     }
 
@@ -88,13 +145,18 @@ impl<'a> MainLoop<'a> {
             writer.flush()?;
             let mut line = String::new();
             let bytes = reader.read_line(&mut line)?;
-            if bytes == 0 { writeln!(writer)?; return Ok(MainLoopStatus::ExitedByEof); }
+            if bytes == 0 {
+                writeln!(writer)?;
+                return Ok(MainLoopStatus::ExitedByEof);
+            }
             let input = line.trim();
             if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
                 writeln!(writer, "bye")?;
                 return Ok(MainLoopStatus::ExitedByCommand);
             }
-            if input.is_empty() { continue; }
+            if input.is_empty() {
+                continue;
+            }
             if input.starts_with('/') {
                 if let Err(e) = self.handle_command(input, &mut writer) {
                     writeln!(writer, "error: {e:#}")?;
@@ -103,7 +165,9 @@ impl<'a> MainLoop<'a> {
             }
             match self.run_agent_turn(input, &mut writer) {
                 Ok(()) => {}
-                Err(e) => { writeln!(writer, "agent error: {e:#}")?; }
+                Err(e) => {
+                    writeln!(writer, "agent error: {e:#}")?;
+                }
             }
         }
     }
@@ -143,7 +207,10 @@ impl<'a> MainLoop<'a> {
                     first_token = false;
                     let elapsed = start_time.elapsed().as_secs_f64();
                     // Clear "\x1b[33m⏳ 思考中...\x1b[0m" and replace with elapsed time
-                    let _ = write!(w.borrow_mut(), "\r\x1b[K\x1b[97m⏳ {elapsed:.1}s\x1b[0m\n\x1b[1;37m");
+                    let _ = write!(
+                        w.borrow_mut(),
+                        "\r\x1b[K\x1b[97m⏳ {elapsed:.1}s\x1b[0m\n\x1b[1;37m"
+                    );
                 }
                 let _ = write!(w.borrow_mut(), "{token}");
                 let _ = w.borrow_mut().flush();
@@ -158,7 +225,10 @@ impl<'a> MainLoop<'a> {
                     "shell" => ("⚡", "\x1b[97m"),
                     _ => ("🔧", "\x1b[97m"),
                 };
-                let _ = writeln!(w.borrow_mut(), "\n\x1b[48;5;240m{color} {icon} TOOL: {desc}\x1b[0m");
+                let _ = writeln!(
+                    w.borrow_mut(),
+                    "\n\x1b[48;5;240m{color} {icon} TOOL: {desc}\x1b[0m"
+                );
                 let _ = w.borrow_mut().flush();
             },
             &mut |name: &str, done: &str| {
@@ -167,8 +237,11 @@ impl<'a> MainLoop<'a> {
                 } else {
                     ("✓", "\x1b[97m")
                 };
-                let truncated = if done.len() > 120 { format!("{}...", &done[..117]) } else { done.to_string() };
-                let _ = writeln!(w.borrow_mut(), "\x1b[48;5;240m{color} {icon} {truncated}\x1b[0m");
+                let truncated = truncate_right(done, 120);
+                let _ = writeln!(
+                    w.borrow_mut(),
+                    "\x1b[48;5;240m{color} {icon} {truncated}\x1b[0m"
+                );
                 let _ = w.borrow_mut().flush();
             },
         );
@@ -177,7 +250,10 @@ impl<'a> MainLoop<'a> {
         match result {
             Ok(()) => {
                 if tool_count > 0 {
-                    writeln!(writer, "\x1b[48;5;240m\x1b[97m── {tool_count} 个工具执行完毕 ──\x1b[0m")?;
+                    writeln!(
+                        writer,
+                        "\x1b[48;5;240m\x1b[97m── {tool_count} 个工具执行完毕 ──\x1b[0m"
+                    )?;
                 }
                 writeln!(writer)?;
                 Ok(())
@@ -207,8 +283,7 @@ impl<'a> MainLoop<'a> {
                 let sub = parts.next();
                 match sub {
                     Some("resume") => {
-                        let id = parts.next()
-                            .context("usage: /session resume <id>")?;
+                        let id = parts.next().context("usage: /session resume <id>")?;
                         match self.store.load_session(id) {
                             Ok(s) => {
                                 self.store.set_active_session(&s.id)?;
@@ -259,7 +334,11 @@ impl<'a> MainLoop<'a> {
                         // Also list available sessions
                         let sessions = self.store.list_sessions()?;
                         if sessions.len() > 1 {
-                            writeln!(writer, "{} other session(s) available: /session resume <id>", sessions.len() - 1)?;
+                            writeln!(
+                                writer,
+                                "{} other session(s) available: /session resume <id>",
+                                sessions.len() - 1
+                            )?;
                             for s in &sessions {
                                 if s.id != self.session.id {
                                     writeln!(
@@ -281,7 +360,11 @@ impl<'a> MainLoop<'a> {
                 } else {
                     writeln!(writer, "{} session(s):", sessions.len())?;
                     for s in &sessions {
-                        let active = if s.id == self.session.id { " (active)" } else { "" };
+                        let active = if s.id == self.session.id {
+                            " (active)"
+                        } else {
+                            ""
+                        };
                         writeln!(
                             writer,
                             "  {}  messages={}  model={}/{}  updated={}{}",
@@ -305,7 +388,10 @@ impl<'a> MainLoop<'a> {
                     0
                 };
                 if start > 0 {
-                    writeln!(writer, "showing last {MAX_VISIBLE_MESSAGES} of {total} messages")?;
+                    writeln!(
+                        writer,
+                        "showing last {MAX_VISIBLE_MESSAGES} of {total} messages"
+                    )?;
                 }
                 for (i, msg) in messages.iter().enumerate().skip(start) {
                     let tc_info = match &msg.tool_calls {
@@ -358,7 +444,11 @@ impl<'a> MainLoop<'a> {
                     self.session.provider.clone(),
                 );
                 self.store.save_session(&self.session)?;
-                writeln!(writer, "cleared {msg_count} messages, new session={}", self.session.id)?;
+                writeln!(
+                    writer,
+                    "cleared {msg_count} messages, new session={}",
+                    self.session.id
+                )?;
                 Ok(true)
             }
             "rollback" => {
@@ -371,8 +461,11 @@ impl<'a> MainLoop<'a> {
                         } else {
                             writeln!(writer, "{} rollback record(s):", records.len())?;
                             for r in &records {
-                                let files: Vec<String> =
-                                    r.changed_files.iter().map(|p| p.display().to_string()).collect();
+                                let files: Vec<String> = r
+                                    .changed_files
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect();
                                 writeln!(
                                     writer,
                                     "  {}  turn={}  tool={}  files=[{}]",
@@ -389,12 +482,7 @@ impl<'a> MainLoop<'a> {
                         let preview = self.rollback_manager.preview(id)?;
                         writeln!(writer, "rollback preview for {}:", preview.record_id)?;
                         for f in &preview.files {
-                            writeln!(
-                                writer,
-                                "  {}  action={:?}",
-                                f.path.display(),
-                                f.action
-                            )?;
+                            writeln!(writer, "  {}  action={:?}", f.path.display(), f.action)?;
                             if !f.diff.is_empty() && f.diff != "(no changes)\n" {
                                 for line in f.diff.lines() {
                                     writeln!(writer, "    {line}")?;
@@ -421,7 +509,10 @@ impl<'a> MainLoop<'a> {
                     }
                     other => {
                         writeln!(writer, "unknown rollback sub-command: {other}")?;
-                        writeln!(writer, "usage: /rollback [list|preview <id>|apply <id>|file <id> <path>]")?;
+                        writeln!(
+                            writer,
+                            "usage: /rollback [list|preview <id>|apply <id>|file <id> <path>]"
+                        )?;
                     }
                 }
                 Ok(true)
@@ -476,19 +567,48 @@ fn create_provider(config: &AppConfig) -> Result<Box<dyn LanguageProvider>> {
 
 fn truncate_display(path: &std::path::Path, max: usize) -> String {
     let s = path.display().to_string();
-    if s.len() <= max { s } else { format!("...{}", &s[s.len().saturating_sub(max - 3)..]) }
+    truncate_left(&s, max)
 }
 
 fn truncate_right(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max.saturating_sub(3)]) }
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
+    }
+
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+
+    let keep = max - 3;
+    let prefix: String = s.chars().take(keep).collect();
+    format!("{prefix}...")
 }
 
-fn truncate_str(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        &s[..max_len]
+fn truncate_left(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
     }
+
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+
+    let keep = max - 3;
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{suffix}")
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    truncate_right(s, max_len)
 }
 
 // ── Help text ───────────────────────────────────────────────────────────────
@@ -587,6 +707,15 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn truncation_handles_utf8_text() {
+        let path = std::path::Path::new("F:\\大二下\\Rust\\cc-haha-rs\\NKU-Rust-Project");
+
+        assert_eq!(truncate_display(path, 12), "...t-Project");
+        assert_eq!(truncate_right("你好，Rust Coding Agent", 8), "你好，Ru...");
+        assert_eq!(truncate_str("中文历史消息不会panic", 6), "中文历...");
     }
 
     fn unique_name(prefix: &str) -> String {

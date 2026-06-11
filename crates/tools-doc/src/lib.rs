@@ -9,8 +9,8 @@ use std::path::Path;
 
 /// Extract plain text from a PDF file.
 pub fn extract_pdf_text(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read PDF: {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read PDF: {}", path.display()))?;
     let text = pdf_extract::extract_text_from_mem(&bytes)
         .with_context(|| format!("failed to extract text from PDF: {}", path.display()))?;
     Ok(text)
@@ -22,8 +22,8 @@ pub fn extract_pdf_text(path: &Path) -> Result<String> {
 /// We parse the XML to extract text from `<w:t>` elements, joining
 /// paragraphs with newlines.
 pub fn extract_docx_text(path: &Path) -> Result<String> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("failed to open DOCX: {}", path.display()))?;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open DOCX: {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .with_context(|| format!("failed to open DOCX as ZIP: {}", path.display()))?;
 
@@ -126,8 +126,7 @@ mod tests {
 
         let file = std::fs::File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let options = FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         // Minimal [Content_Types].xml
         zip.start_file("[Content_Types].xml", options).unwrap();

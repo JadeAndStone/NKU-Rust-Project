@@ -44,8 +44,12 @@ pub struct ProviderRequest {
 /// The response from a LanguageProvider, either a text reply or tool call requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderResponse {
-    Text { content: String },
-    ToolCalls { calls: Vec<crate::message::ToolCall> },
+    Text {
+        content: String,
+    },
+    ToolCalls {
+        calls: Vec<crate::message::ToolCall>,
+    },
 }
 
 pub trait LanguageProvider {

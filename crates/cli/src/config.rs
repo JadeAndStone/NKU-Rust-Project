@@ -203,9 +203,15 @@ model = "demo-model"
         fs::remove_dir_all(&dir).unwrap();
 
         // Restore env vars
-        if let Some(v) = saved_provider { env::set_var("RUST_CODINGAGENT_PROVIDER", v); }
-        if let Some(v) = saved_model { env::set_var("RUST_CODINGAGENT_MODEL", v); }
-        if let Some(v) = saved_api_key { env::set_var("RUST_CODINGAGENT_API_KEY", v); }
+        if let Some(v) = saved_provider {
+            env::set_var("RUST_CODINGAGENT_PROVIDER", v);
+        }
+        if let Some(v) = saved_model {
+            env::set_var("RUST_CODINGAGENT_MODEL", v);
+        }
+        if let Some(v) = saved_api_key {
+            env::set_var("RUST_CODINGAGENT_API_KEY", v);
+        }
     }
 
     fn unique_name(prefix: &str) -> String {

@@ -58,12 +58,7 @@ fn run_command_enters_main_loop() {
         .spawn()
         .unwrap();
 
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"exit\n")
-        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"exit\n").unwrap();
     let output = child.wait_with_output().unwrap();
 
     assert!(output.status.success());
