@@ -1,22 +1,167 @@
 use std::env;
-use std::io::{BufRead, Write};
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use rust_codingagent_agent::Agent;
+use anyhow::{bail, Context, Result};
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{self, ClearType},
+};
+use rust_codingagent_agent::{Agent, ShellApproval};
 use rust_codingagent_core::{
-    LanguageProvider, ProviderConfig as CoreProviderConfig, Session, SessionStore,
+    LanguageProvider, Message, MessageRole, ProviderConfig as CoreProviderConfig, ProviderRequest,
+    ProviderResponse, Session, SessionStore,
 };
 use rust_codingagent_provider_remote::RemoteProvider;
 use rust_codingagent_rollback::RollbackManager;
+use serde::{Deserialize, Serialize};
 
 use crate::config::AppConfig;
 
 const MAX_VISIBLE_MESSAGES: usize = 50;
+const MAX_PLAN_STEPS: usize = 8;
+
+const PLAN_SYSTEM_PROMPT: &str = r#"You are the planning mode of a coding CLI agent.
+Create a practical execution plan for the user's coding task.
+
+Rules:
+- Do not call tools.
+- Do not modify files.
+- Produce only TOML, with no markdown fence and no explanation.
+- Use 3 to 6 steps unless the task clearly needs more.
+- Each step must be independently executable by a coding agent.
+- Each instruction should be specific, concrete, and mention relevant files or checks when possible.
+- Include verification as the final step.
+
+Output schema:
+[[steps]]
+instruction = "Inspect the relevant files and identify the change points."
+
+[[steps]]
+instruction = "Implement the first concrete change."
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainLoopStatus {
     ExitedByCommand,
     ExitedByEof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupSessionItem {
+    pub id: String,
+    pub message_count: usize,
+    pub model: String,
+    pub updated_at_ms: u64,
+    pub preview: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowPlan {
+    id: String,
+    goal: String,
+    steps: Vec<WorkflowStep>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkflowStep {
+    index: usize,
+    instruction: String,
+    status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CommandApprovalRule {
+    prefix: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CommandApprovalRules {
+    rules: Vec<CommandApprovalRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalChoice {
+    AllowOnce,
+    AlwaysAllowSimilar,
+    Deny,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelGeneratedPlan {
+    steps: Vec<ModelGeneratedStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelGeneratedStep {
+    instruction: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum PlanStepStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+}
+
+impl WorkflowPlan {
+    fn from_instructions(goal: String, instructions: Vec<String>) -> Result<Self> {
+        if instructions.is_empty() {
+            bail!("model returned no plan steps");
+        }
+        if instructions.len() > MAX_PLAN_STEPS {
+            bail!(
+                "model returned {} plan steps, maximum is {MAX_PLAN_STEPS}",
+                instructions.len()
+            );
+        }
+
+        let now = unix_millis();
+        let steps = instructions
+            .into_iter()
+            .enumerate()
+            .map(|(index, instruction)| WorkflowStep {
+                index: index + 1,
+                instruction,
+                status: PlanStepStatus::Pending,
+            })
+            .collect();
+
+        Ok(Self {
+            id: format!("plan-{now}"),
+            goal,
+            steps,
+            created_at_ms: now,
+            updated_at_ms: now,
+        })
+    }
+
+    fn touch(&mut self) {
+        self.updated_at_ms = unix_millis();
+    }
+
+    fn next_step_pos(&self) -> Option<usize> {
+        self.steps.iter().position(|step| {
+            matches!(
+                step.status,
+                PlanStepStatus::Pending | PlanStepStatus::Failed
+            )
+        })
+    }
+
+    fn is_complete(&self) -> bool {
+        self.steps
+            .iter()
+            .all(|step| step.status == PlanStepStatus::Done)
+    }
 }
 
 pub struct MainLoop<'a> {
@@ -25,6 +170,8 @@ pub struct MainLoop<'a> {
     session: Session,
     provider: Box<dyn LanguageProvider>,
     rollback_manager: RollbackManager,
+    active_plan: Option<WorkflowPlan>,
+    command_approval_rules: Vec<CommandApprovalRule>,
 }
 
 impl<'a> MainLoop<'a> {
@@ -44,6 +191,8 @@ impl<'a> MainLoop<'a> {
         )?;
 
         let rollback_manager = RollbackManager::new(session.context())?;
+        let active_plan = load_active_plan(&store, &config.profile)?;
+        let command_approval_rules = load_command_approval_rules(&store, &config.profile)?;
 
         Ok(Self {
             config,
@@ -51,10 +200,67 @@ impl<'a> MainLoop<'a> {
             session,
             provider,
             rollback_manager,
+            active_plan,
+            command_approval_rules,
         })
     }
 
     // ── Main REPL loop ──────────────────────────────────────────────────
+
+    pub fn startup_session_items(&self, limit: usize) -> Result<Vec<StartupSessionItem>> {
+        let sessions = self.store.list_sessions()?;
+        let mut items = Vec::new();
+
+        for summary in sessions.into_iter().take(limit) {
+            let preview = self
+                .session_preview(&summary.id)
+                .unwrap_or_else(|_| "(unable to load preview)".to_string());
+            items.push(StartupSessionItem {
+                id: summary.id.clone(),
+                message_count: summary.message_count,
+                model: summary.model,
+                updated_at_ms: summary.updated_at_ms,
+                preview,
+                active: summary.id == self.session.id,
+            });
+        }
+
+        Ok(items)
+    }
+
+    pub fn resume_session_by_id(&mut self, id: &str) -> Result<()> {
+        let session = self.store.load_session(id)?;
+        self.store.set_active_session(&session.id)?;
+        self.rollback_manager = RollbackManager::new(session.context())?;
+        self.session = session;
+        Ok(())
+    }
+
+    pub fn create_fresh_session(&mut self) -> Result<()> {
+        self.session = Session::new(
+            self.session.profile.clone(),
+            self.session.workspace.clone(),
+            self.session.provider.clone(),
+        );
+        self.store.save_session(&self.session)?;
+        self.store.set_active_session(&self.session.id)?;
+        self.rollback_manager = RollbackManager::new(self.session.context())?;
+        Ok(())
+    }
+
+    fn session_preview(&self, id: &str) -> Result<String> {
+        let session = self.store.load_session(id)?;
+        let preview = session
+            .history
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .map(|message| truncate_str(message.content.trim(), 72))
+            .filter(|content| !content.is_empty())
+            .unwrap_or_else(|| "(empty conversation)".to_string());
+        Ok(preview)
+    }
 
     pub fn print_banner<W: Write>(&self, writer: &mut W) -> Result<()> {
         writeln!(
@@ -117,6 +323,10 @@ impl<'a> MainLoop<'a> {
         writeln!(
             writer,
             "║  /clear       开启新对话                            ║"
+        )?;
+        writeln!(
+            writer,
+            "║  /plan        生成/执行自动化工作流计划             ║"
         )?;
         writeln!(
             writer,
@@ -183,6 +393,12 @@ impl<'a> MainLoop<'a> {
     }
 
     pub fn run_agent_turn<W: Write>(&mut self, input: &str, writer: &mut W) -> Result<()> {
+        use std::cell::RefCell;
+
+        let approval_rules = RefCell::new(std::mem::take(&mut self.command_approval_rules));
+        let approval_store = self.store.clone();
+        let approval_profile = self.config.profile.clone();
+
         let mut agent = Agent::new(
             self.provider.as_ref(),
             &mut self.session,
@@ -194,7 +410,6 @@ impl<'a> MainLoop<'a> {
         write!(writer, "\n\x1b[93m⏳ 思考中...\x1b[0m")?;
         writer.flush()?;
 
-        use std::cell::RefCell;
         let w = RefCell::new(writer);
         let mut first_token = true;
         let mut tool_count = 0u32;
@@ -244,7 +459,18 @@ impl<'a> MainLoop<'a> {
                 );
                 let _ = w.borrow_mut().flush();
             },
+            &mut |command: &str| {
+                approve_shell_command(
+                    command,
+                    &approval_rules,
+                    &approval_store,
+                    &approval_profile,
+                    &w,
+                )
+            },
         );
+        drop(agent);
+        self.command_approval_rules = approval_rules.into_inner();
         let writer = w.into_inner();
 
         match result {
@@ -266,6 +492,141 @@ impl<'a> MainLoop<'a> {
     }
 
     // ── Slash commands ─────────────────────────────────────────────────
+
+    fn handle_plan_command<W: Write>(&mut self, args: &[&str], writer: &mut W) -> Result<bool> {
+        match args.first().copied() {
+            None | Some("status") => {
+                self.print_plan_status(writer)?;
+            }
+            Some("clear") => {
+                clear_active_plan(&self.store, &self.config.profile)?;
+                self.active_plan = None;
+                writeln!(writer, "cleared active plan")?;
+            }
+            Some("run") => {
+                if self.active_plan.is_none() {
+                    writeln!(writer, "no active plan. create one with /plan <task>")?;
+                    return Ok(true);
+                }
+
+                while self
+                    .active_plan
+                    .as_ref()
+                    .and_then(WorkflowPlan::next_step_pos)
+                    .is_some()
+                {
+                    self.run_next_plan_step(writer)?;
+                }
+
+                if self
+                    .active_plan
+                    .as_ref()
+                    .is_some_and(WorkflowPlan::is_complete)
+                {
+                    writeln!(writer, "plan complete")?;
+                }
+            }
+            Some("step") => {
+                if !self.run_next_plan_step(writer)? {
+                    writeln!(writer, "no runnable plan step")?;
+                }
+            }
+            Some("help") => {
+                writeln!(
+                    writer,
+                    "usage: /plan <task> | /plan status | /plan step | /plan run | /plan clear"
+                )?;
+            }
+            Some(_) => {
+                let goal = args.join(" ");
+                writeln!(writer, "planning with model...")?;
+                let plan = self.generate_plan_with_model(&goal)?;
+                save_active_plan(&self.store, &self.config.profile, &plan)?;
+                self.active_plan = Some(plan);
+                writeln!(writer, "created active plan")?;
+                self.print_plan_status(writer)?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn print_plan_status<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let Some(plan) = &self.active_plan else {
+            writeln!(writer, "no active plan. create one with /plan <task>")?;
+            return Ok(());
+        };
+
+        writeln!(writer, "plan: {}", plan.goal)?;
+        for step in &plan.steps {
+            writeln!(
+                writer,
+                "  {}. [{:?}] {}",
+                step.index, step.status, step.instruction
+            )?;
+        }
+        Ok(())
+    }
+
+    fn generate_plan_with_model(&self, goal: &str) -> Result<WorkflowPlan> {
+        let workspace_outline = collect_workspace_outline(&self.config.workspace);
+        let prompt = build_plan_prompt(goal, &self.config.workspace, &workspace_outline);
+        let request = ProviderRequest {
+            context: self.session.context(),
+            messages: vec![Message::system(PLAN_SYSTEM_PROMPT), Message::user(prompt)],
+            tools: vec![],
+        };
+
+        match self.provider.complete(request)? {
+            ProviderResponse::Text { content } => parse_model_plan(goal, &content)
+                .with_context(|| format!("failed to parse model plan response: {content}")),
+            ProviderResponse::ToolCalls { .. } => {
+                bail!("model returned tool calls while planning; expected TOML text")
+            }
+        }
+    }
+
+    fn run_next_plan_step<W: Write>(&mut self, writer: &mut W) -> Result<bool> {
+        let Some(step_pos) = self
+            .active_plan
+            .as_ref()
+            .and_then(WorkflowPlan::next_step_pos)
+        else {
+            return Ok(false);
+        };
+
+        let (step_index, instruction) = {
+            let plan = self.active_plan.as_mut().expect("plan checked above");
+            let step = &mut plan.steps[step_pos];
+            step.status = PlanStepStatus::Running;
+            let step_index = step.index;
+            let instruction = step.instruction.clone();
+            plan.touch();
+            save_active_plan(&self.store, &self.config.profile, plan)?;
+            (step_index, instruction)
+        };
+
+        writeln!(writer, "\n[plan] running step {step_index}: {instruction}")?;
+
+        let result = self.run_agent_turn(&instruction, writer);
+        let status = if result.is_ok() {
+            PlanStepStatus::Done
+        } else {
+            PlanStepStatus::Failed
+        };
+
+        if let Some(plan) = self.active_plan.as_mut() {
+            if let Some(step) = plan.steps.get_mut(step_pos) {
+                step.status = status;
+            }
+            plan.touch();
+            save_active_plan(&self.store, &self.config.profile, plan)?;
+        }
+
+        result?;
+        writeln!(writer, "[plan] step {step_index} done")?;
+        Ok(true)
+    }
 
     pub fn handle_command<W: Write>(&mut self, input: &str, writer: &mut W) -> Result<bool> {
         let command = input.strip_prefix('/').unwrap_or(input);
@@ -444,11 +805,49 @@ impl<'a> MainLoop<'a> {
                     self.session.provider.clone(),
                 );
                 self.store.save_session(&self.session)?;
+                self.store.set_active_session(&self.session.id)?;
                 writeln!(
                     writer,
                     "cleared {msg_count} messages, new session={}",
                     self.session.id
                 )?;
+                Ok(true)
+            }
+            "plan" => {
+                let args: Vec<&str> = parts.collect();
+                self.handle_plan_command(&args, writer)
+            }
+            "approvals" => {
+                match parts.next() {
+                    Some("clear") => {
+                        self.command_approval_rules.clear();
+                        save_command_approval_rules(
+                            &self.store,
+                            &self.config.profile,
+                            &self.command_approval_rules,
+                        )?;
+                        writeln!(writer, "cleared command approval rules")?;
+                    }
+                    _ => {
+                        if self.command_approval_rules.is_empty() {
+                            writeln!(writer, "no saved command approval rules")?;
+                        } else {
+                            writeln!(
+                                writer,
+                                "{} command approval rule(s):",
+                                self.command_approval_rules.len()
+                            )?;
+                            for rule in &self.command_approval_rules {
+                                writeln!(
+                                    writer,
+                                    "  allow commands starting with `{}`",
+                                    rule.prefix
+                                )?;
+                            }
+                            writeln!(writer, "use /approvals clear to remove all rules")?;
+                        }
+                    }
+                }
                 Ok(true)
             }
             "rollback" => {
@@ -537,6 +936,526 @@ impl<'a> MainLoop<'a> {
 
 // ── Provider factory ────────────────────────────────────────────────────────
 
+fn build_plan_prompt(goal: &str, workspace: &Path, workspace_outline: &str) -> String {
+    format!(
+        "User task:\n{goal}\n\nWorkspace:\n{}\n\nWorkspace outline:\n{workspace_outline}\n\nReturn only TOML following the schema.",
+        workspace.display()
+    )
+}
+
+fn parse_model_plan(goal: &str, raw: &str) -> Result<WorkflowPlan> {
+    let candidate = extract_toml_plan(raw)?;
+    let parsed: ModelGeneratedPlan =
+        toml::from_str(&candidate).context("model plan is not valid TOML")?;
+
+    let instructions: Vec<String> = parsed
+        .steps
+        .into_iter()
+        .map(|step| step.instruction.trim().to_string())
+        .filter(|instruction| !instruction.is_empty())
+        .collect();
+
+    if instructions.len() < 2 {
+        bail!("model plan must contain at least 2 non-empty steps");
+    }
+
+    WorkflowPlan::from_instructions(goal.to_string(), instructions)
+}
+
+fn extract_toml_plan(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    let without_fence = strip_code_fence(trimmed);
+    if toml::from_str::<ModelGeneratedPlan>(&without_fence).is_ok() {
+        return Ok(without_fence);
+    }
+
+    if let Some(start) = without_fence.find("[[steps]]") {
+        return Ok(without_fence[start..].trim().to_string());
+    }
+
+    bail!("model response did not contain [[steps]] TOML")
+}
+
+fn strip_code_fence(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    let mut lines = trimmed.lines();
+    let _ = lines.next();
+    let mut body = lines.collect::<Vec<_>>().join("\n");
+    if let Some(pos) = body.rfind("```") {
+        body.truncate(pos);
+    }
+    body.trim().to_string()
+}
+
+fn collect_workspace_outline(workspace: &Path) -> String {
+    let mut entries = Vec::new();
+    collect_workspace_outline_inner(workspace, workspace, 0, &mut entries);
+    if entries.is_empty() {
+        "(workspace is empty or cannot be read)".to_string()
+    } else {
+        entries.join("\n")
+    }
+}
+
+fn collect_workspace_outline_inner(
+    root: &Path,
+    current: &Path,
+    depth: usize,
+    entries: &mut Vec<String>,
+) {
+    if depth > 2 || entries.len() >= 80 {
+        return;
+    }
+
+    let Ok(read_dir) = fs::read_dir(current) else {
+        return;
+    };
+
+    let mut children = read_dir
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| !is_ignored_outline_entry(&entry.path()))
+        .collect::<Vec<_>>();
+    children.sort_by_key(|entry| entry.file_name());
+
+    for entry in children {
+        if entries.len() >= 80 {
+            return;
+        }
+
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let marker = if path.is_dir() { "/" } else { "" };
+        entries.push(format!("{}{}", relative.display(), marker));
+
+        if path.is_dir() {
+            collect_workspace_outline_inner(root, &path, depth + 1, entries);
+        }
+    }
+}
+
+fn is_ignored_outline_entry(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".rust-codingagent" | ".agents" | ".codex"
+    )
+}
+
+fn approve_shell_command<W: Write>(
+    command: &str,
+    rules: &std::cell::RefCell<Vec<CommandApprovalRule>>,
+    store: &SessionStore,
+    profile: &str,
+    writer: &std::cell::RefCell<&mut W>,
+) -> ShellApproval {
+    if let Some(rule) = rules
+        .borrow()
+        .iter()
+        .find(|rule| command_matches_rule(command, rule))
+        .cloned()
+    {
+        let _ = writeln!(
+            writer.borrow_mut(),
+            "\x1b[90m[approval] allowed by rule: {}\x1b[0m",
+            rule.prefix
+        );
+        let _ = writer.borrow_mut().flush();
+        return ShellApproval::Approved;
+    }
+
+    let suggested_rule = command_rule_prefix(command);
+    let summary = describe_shell_command(command);
+    let choice = prompt_approval_choice(command, &summary, &suggested_rule, writer);
+
+    match choice {
+        ApprovalChoice::AllowOnce => ShellApproval::Approved,
+        ApprovalChoice::AlwaysAllowSimilar => {
+            {
+                let mut rules = rules.borrow_mut();
+                if !rules.iter().any(|rule| rule.prefix == suggested_rule) {
+                    rules.push(CommandApprovalRule {
+                        prefix: suggested_rule.clone(),
+                    });
+                }
+            }
+            if let Err(e) = save_command_approval_rules(store, profile, &rules.borrow()) {
+                let _ = writeln!(
+                    writer.borrow_mut(),
+                    "warning: failed to save approval rule: {e:#}"
+                );
+            }
+            ShellApproval::Approved
+        }
+        ApprovalChoice::Deny => ShellApproval::Denied,
+    }
+}
+
+fn command_matches_rule(command: &str, rule: &CommandApprovalRule) -> bool {
+    command.trim_start().starts_with(&rule.prefix)
+}
+
+fn prompt_approval_choice<W: Write>(
+    command: &str,
+    summary: &str,
+    suggested_rule: &str,
+    writer: &std::cell::RefCell<&mut W>,
+) -> ApprovalChoice {
+    let mut selected = ApprovalChoice::AllowOnce;
+    if terminal::enable_raw_mode().is_err() {
+        return prompt_approval_choice_line(command, summary, suggested_rule, writer);
+    }
+
+    let mut rendered_lines = 0u16;
+    loop {
+        rendered_lines = render_approval_menu(
+            command,
+            summary,
+            suggested_rule,
+            selected,
+            writer,
+            rendered_lines,
+        );
+
+        match event::read() {
+            Ok(Event::Key(key)) => match key.code {
+                KeyCode::Up => selected = previous_approval_choice(selected),
+                KeyCode::Down => selected = next_approval_choice(selected),
+                KeyCode::Enter => {
+                    let _ = terminal::disable_raw_mode();
+                    clear_approval_menu(writer, rendered_lines);
+                    return selected;
+                }
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let _ = terminal::disable_raw_mode();
+                    clear_approval_menu(writer, rendered_lines);
+                    return ApprovalChoice::AllowOnce;
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    let _ = terminal::disable_raw_mode();
+                    clear_approval_menu(writer, rendered_lines);
+                    return ApprovalChoice::AlwaysAllowSimilar;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    let _ = terminal::disable_raw_mode();
+                    clear_approval_menu(writer, rendered_lines);
+                    return ApprovalChoice::Deny;
+                }
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => {
+                let _ = terminal::disable_raw_mode();
+                clear_approval_menu(writer, rendered_lines);
+                return prompt_approval_choice_line(command, summary, suggested_rule, writer);
+            }
+        }
+    }
+}
+
+fn prompt_approval_choice_line<W: Write>(
+    command: &str,
+    summary: &str,
+    suggested_rule: &str,
+    writer: &std::cell::RefCell<&mut W>,
+) -> ApprovalChoice {
+    let _ = writeln!(
+        writer.borrow_mut(),
+        "\n\x1b[93m? Shell command requires approval\x1b[0m\n  Intent : {summary}\n  Command: {command}\n  Rule   : {suggested_rule}\n\n  Enter/y = allow once   a = always allow similar   n = deny"
+    );
+    let _ = write!(writer.borrow_mut(), "approve? ");
+    let _ = writer.borrow_mut().flush();
+
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        let _ = writeln!(
+            writer.borrow_mut(),
+            "approval input failed; denying command"
+        );
+        return ApprovalChoice::Deny;
+    }
+
+    match line.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => ApprovalChoice::AllowOnce,
+        "a" | "always" => ApprovalChoice::AlwaysAllowSimilar,
+        _ => ApprovalChoice::Deny,
+    }
+}
+
+fn render_approval_menu<W: Write>(
+    command: &str,
+    summary: &str,
+    suggested_rule: &str,
+    selected: ApprovalChoice,
+    writer: &std::cell::RefCell<&mut W>,
+    previous_lines: u16,
+) -> u16 {
+    if previous_lines > 0 {
+        let mut writer = writer.borrow_mut();
+        let _ = execute!(
+            &mut *writer,
+            cursor::MoveUp(previous_lines),
+            terminal::Clear(ClearType::FromCursorDown)
+        );
+    }
+
+    let options = [
+        (
+            ApprovalChoice::AllowOnce,
+            "Allow once",
+            "run only this command now",
+        ),
+        (
+            ApprovalChoice::AlwaysAllowSimilar,
+            "Always allow similar",
+            "save this command prefix as trusted",
+        ),
+        (ApprovalChoice::Deny, "Deny", "do not run this command"),
+    ];
+
+    let command_display = truncate_str(command, 96);
+    let _ = writeln!(
+        writer.borrow_mut(),
+        "\x1b[93m? Shell command requires approval\x1b[0m"
+    );
+    let _ = writeln!(writer.borrow_mut(), "  Intent : {summary}");
+    let _ = writeln!(writer.borrow_mut(), "  Command: {command_display}");
+    let _ = writeln!(writer.borrow_mut(), "  Rule   : {suggested_rule}");
+    let _ = writeln!(
+        writer.borrow_mut(),
+        "  Use ↑/↓ then Enter. Shortcuts: y=once, a=always, n=deny"
+    );
+
+    for (choice, label, help) in options {
+        let marker = if choice == selected { ">" } else { " " };
+        let style = if choice == selected {
+            "\x1b[1;36m"
+        } else {
+            "\x1b[90m"
+        };
+        let _ = writeln!(
+            writer.borrow_mut(),
+            "  {style}{marker} {label:<22}\x1b[0m {help}"
+        );
+    }
+    let _ = writer.borrow_mut().flush();
+
+    8
+}
+
+fn clear_approval_menu<W: Write>(writer: &std::cell::RefCell<&mut W>, lines: u16) {
+    if lines == 0 {
+        return;
+    }
+
+    let mut writer = writer.borrow_mut();
+    let _ = execute!(
+        &mut *writer,
+        cursor::MoveUp(lines),
+        terminal::Clear(ClearType::FromCursorDown)
+    );
+    let _ = writer.flush();
+}
+
+fn next_approval_choice(choice: ApprovalChoice) -> ApprovalChoice {
+    match choice {
+        ApprovalChoice::AllowOnce => ApprovalChoice::AlwaysAllowSimilar,
+        ApprovalChoice::AlwaysAllowSimilar => ApprovalChoice::Deny,
+        ApprovalChoice::Deny => ApprovalChoice::AllowOnce,
+    }
+}
+
+fn previous_approval_choice(choice: ApprovalChoice) -> ApprovalChoice {
+    match choice {
+        ApprovalChoice::AllowOnce => ApprovalChoice::Deny,
+        ApprovalChoice::AlwaysAllowSimilar => ApprovalChoice::AllowOnce,
+        ApprovalChoice::Deny => ApprovalChoice::AlwaysAllowSimilar,
+    }
+}
+
+fn command_rule_prefix(command: &str) -> String {
+    let words = command
+        .split_whitespace()
+        .take(2)
+        .map(|word| word.trim_matches('"').trim_matches('\''))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+
+    if words.is_empty() {
+        return command.trim().to_string();
+    }
+
+    let first = words[0];
+    match first {
+        "cargo" | "git" | "npm" | "pnpm" | "yarn" | "python" | "python3" | "rustc"
+            if words.len() >= 2 =>
+        {
+            format!("{} {}", words[0], words[1])
+        }
+        _ => first.to_string(),
+    }
+}
+
+fn describe_shell_command(command: &str) -> String {
+    let lower = command.trim().to_ascii_lowercase();
+    let words = lower.split_whitespace().collect::<Vec<_>>();
+    let Some(first) = words.first().copied() else {
+        return "Run a shell command".to_string();
+    };
+
+    match first {
+        "cargo" => match words.get(1).copied() {
+            Some("test") => "Run Rust tests to verify the project".to_string(),
+            Some("check") => {
+                "Type-check the Rust project without building final binaries".to_string()
+            }
+            Some("fmt") => "Format Rust source files".to_string(),
+            Some("run") => "Run the Rust application".to_string(),
+            Some("build") => "Build the Rust project".to_string(),
+            _ => "Run a Cargo command for this Rust project".to_string(),
+        },
+        "git" => match words.get(1).copied() {
+            Some("status") => "Inspect repository status".to_string(),
+            Some("diff") => "Inspect uncommitted code changes".to_string(),
+            Some("log") => "Inspect commit history".to_string(),
+            Some("add") => "Stage files for a Git commit".to_string(),
+            Some("commit") => "Create a Git commit".to_string(),
+            Some("push") => "Push local commits to the remote repository".to_string(),
+            Some("pull") => "Pull remote changes into the local repository".to_string(),
+            _ => "Run a Git repository command".to_string(),
+        },
+        "npm" | "pnpm" | "yarn" => match words.get(1).copied() {
+            Some("test") => "Run JavaScript project tests".to_string(),
+            Some("run") => "Run a package script".to_string(),
+            Some("install") | Some("add") => "Install package dependencies".to_string(),
+            _ => "Run a JavaScript package manager command".to_string(),
+        },
+        "python" | "python3" => "Run a Python script or inline Python command".to_string(),
+        "mkdir" => "Create a directory".to_string(),
+        "dir" | "ls" => "List files in a directory".to_string(),
+        "type" | "cat" => "Print file contents".to_string(),
+        "del" | "rm" => "Delete files or directories".to_string(),
+        "copy" | "cp" => "Copy files or directories".to_string(),
+        "move" | "mv" => "Move or rename files or directories".to_string(),
+        _ => "Run a shell command requested by the model".to_string(),
+    }
+}
+
+fn load_command_approval_rules(
+    store: &SessionStore,
+    profile: &str,
+) -> Result<Vec<CommandApprovalRule>> {
+    let path = command_approval_rules_path(store, profile);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read approval rules file {}", path.display()))?;
+    let rules: CommandApprovalRules = toml::from_str(&content)
+        .with_context(|| format!("failed to parse approval rules file {}", path.display()))?;
+    Ok(rules.rules)
+}
+
+fn save_command_approval_rules(
+    store: &SessionStore,
+    profile: &str,
+    rules: &[CommandApprovalRule],
+) -> Result<()> {
+    fs::create_dir_all(store.state_root()).with_context(|| {
+        format!(
+            "failed to create state directory {}",
+            store.state_root().display()
+        )
+    })?;
+    let path = command_approval_rules_path(store, profile);
+    let content = toml::to_string_pretty(&CommandApprovalRules {
+        rules: rules.to_vec(),
+    })
+    .context("failed to serialize approval rules")?;
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write approval rules file {}", path.display()))
+}
+
+fn command_approval_rules_path(store: &SessionStore, profile: &str) -> PathBuf {
+    store.state_root().join(format!(
+        "command-approvals-{}.toml",
+        sanitize_file_segment(profile)
+    ))
+}
+
+fn load_active_plan(store: &SessionStore, profile: &str) -> Result<Option<WorkflowPlan>> {
+    let path = plan_path(store, profile);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read active plan file {}", path.display()))?;
+    let plan = toml::from_str(&content)
+        .with_context(|| format!("failed to parse active plan file {}", path.display()))?;
+    Ok(Some(plan))
+}
+
+fn save_active_plan(store: &SessionStore, profile: &str, plan: &WorkflowPlan) -> Result<()> {
+    fs::create_dir_all(store.state_root()).with_context(|| {
+        format!(
+            "failed to create state directory {}",
+            store.state_root().display()
+        )
+    })?;
+    let path = plan_path(store, profile);
+    let content = toml::to_string_pretty(plan).context("failed to serialize active plan")?;
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write active plan file {}", path.display()))
+}
+
+fn clear_active_plan(store: &SessionStore, profile: &str) -> Result<()> {
+    let path = plan_path(store, profile);
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to remove active plan file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn plan_path(store: &SessionStore, profile: &str) -> PathBuf {
+    store.state_root().join(format!(
+        "active-plan-{}.toml",
+        sanitize_file_segment(profile)
+    ))
+}
+
+fn sanitize_file_segment(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '-',
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn create_provider(config: &AppConfig) -> Result<Box<dyn LanguageProvider>> {
     let api_key = config
         .provider
@@ -621,6 +1540,13 @@ const HELP_TEXT: &str = r#"Available commands:
   /history           Show message history (last 50)
   /model [name]      Show or switch model
   /clear             Clear message history, start new session
+  /plan <task>       Create an automated workflow plan
+  /plan status       Show the active plan
+  /plan step         Run the next plan step
+  /plan run          Run all remaining plan steps
+  /plan clear        Clear the active plan
+  /approvals         List saved shell command approval rules
+  /approvals clear   Clear saved shell command approval rules
   /rollback list     List all rollback records
   /rollback preview <id>  Preview what a rollback would change
   /rollback apply <id>    Apply a rollback (restore files)
@@ -705,6 +1631,164 @@ mod tests {
                 // Provider creation may fail, expected in CI
             }
         }
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn workflow_plan_from_instructions_has_pending_steps() {
+        let plan = WorkflowPlan::from_instructions(
+            "add plan mode".to_string(),
+            vec![
+                "Inspect the REPL command handling.".to_string(),
+                "Implement generated planning.".to_string(),
+                "Run cargo test.".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(plan.goal, "add plan mode");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].index, 1);
+        assert_eq!(plan.steps[0].status, PlanStepStatus::Pending);
+        assert!(plan.steps[0].instruction.contains("REPL"));
+        assert_eq!(plan.next_step_pos(), Some(0));
+        assert!(!plan.is_complete());
+    }
+
+    #[test]
+    fn active_plan_persistence_round_trips() {
+        let workspace = std::env::temp_dir().join(unique_name("rust-codingagent-plan-store"));
+        let store = SessionStore::new(&workspace, "test/profile");
+        let mut plan = WorkflowPlan::from_instructions(
+            "persist me".to_string(),
+            vec!["First step.".to_string(), "Second step.".to_string()],
+        )
+        .unwrap();
+        plan.steps[0].status = PlanStepStatus::Done;
+
+        save_active_plan(&store, "test/profile", &plan).unwrap();
+        let loaded = load_active_plan(&store, "test/profile").unwrap().unwrap();
+
+        assert_eq!(loaded.id, plan.id);
+        assert_eq!(loaded.goal, "persist me");
+        assert_eq!(loaded.steps[0].status, PlanStepStatus::Done);
+
+        clear_active_plan(&store, "test/profile").unwrap();
+        assert!(load_active_plan(&store, "test/profile").unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn parses_model_generated_plan_toml() {
+        let raw = r#"
+[[steps]]
+instruction = "Inspect crates/cli/src/repl.rs and find slash command handling."
+
+[[steps]]
+instruction = "Implement model-generated plan creation."
+
+[[steps]]
+instruction = "Run cargo fmt and cargo test."
+"#;
+
+        let plan = parse_model_plan("add model plan mode", raw).unwrap();
+
+        assert_eq!(plan.goal, "add model plan mode");
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].index, 1);
+        assert!(plan.steps[1].instruction.contains("model-generated"));
+    }
+
+    #[test]
+    fn parses_model_generated_plan_inside_code_fence() {
+        let raw = r#"```toml
+[[steps]]
+instruction = "Inspect the project."
+
+[[steps]]
+instruction = "Verify the implementation."
+```"#;
+
+        let plan = parse_model_plan("fenced output", raw).unwrap();
+
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].instruction, "Inspect the project.");
+    }
+
+    #[test]
+    fn rejects_model_plan_with_too_few_steps() {
+        let raw = r#"
+[[steps]]
+instruction = "Only one step."
+"#;
+
+        let err = parse_model_plan("too short", raw).unwrap_err();
+        assert!(err.to_string().contains("at least 2"));
+    }
+
+    #[test]
+    fn command_approval_rule_prefixes_are_scoped() {
+        assert_eq!(
+            command_rule_prefix("cargo test -p rust-codingagent-cli"),
+            "cargo test"
+        );
+        assert_eq!(command_rule_prefix("git status --short"), "git status");
+        assert_eq!(command_rule_prefix("mkdir dist"), "mkdir");
+    }
+
+    #[test]
+    fn shell_command_descriptions_explain_intent() {
+        assert_eq!(
+            describe_shell_command("cargo test -p rust-codingagent-cli"),
+            "Run Rust tests to verify the project"
+        );
+        assert_eq!(
+            describe_shell_command("git push origin main"),
+            "Push local commits to the remote repository"
+        );
+        assert_eq!(describe_shell_command("mkdir dist"), "Create a directory");
+    }
+
+    #[test]
+    fn approval_menu_choices_wrap() {
+        assert_eq!(
+            next_approval_choice(ApprovalChoice::AllowOnce),
+            ApprovalChoice::AlwaysAllowSimilar
+        );
+        assert_eq!(
+            next_approval_choice(ApprovalChoice::Deny),
+            ApprovalChoice::AllowOnce
+        );
+        assert_eq!(
+            previous_approval_choice(ApprovalChoice::AllowOnce),
+            ApprovalChoice::Deny
+        );
+    }
+
+    #[test]
+    fn command_approval_rules_round_trip() {
+        let workspace = std::env::temp_dir().join(unique_name("rust-codingagent-approvals"));
+        let store = SessionStore::new(&workspace, "test/profile");
+        let rules = vec![
+            CommandApprovalRule {
+                prefix: "cargo test".to_string(),
+            },
+            CommandApprovalRule {
+                prefix: "git status".to_string(),
+            },
+        ];
+
+        save_command_approval_rules(&store, "test/profile", &rules).unwrap();
+        let loaded = load_command_approval_rules(&store, "test/profile").unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert!(command_matches_rule(
+            "cargo test -p rust-codingagent-cli",
+            &loaded[0]
+        ));
+        assert!(!command_matches_rule("cargo run", &loaded[0]));
 
         let _ = std::fs::remove_dir_all(&workspace);
     }

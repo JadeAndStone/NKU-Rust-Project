@@ -58,6 +58,12 @@ pub struct Agent<'a> {
     rollback: &'a RollbackManager,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellApproval {
+    Approved,
+    Denied,
+}
+
 impl<'a> Agent<'a> {
     pub fn new(
         provider: &'a dyn LanguageProvider,
@@ -154,6 +160,7 @@ impl<'a> Agent<'a> {
         on_token: &mut dyn FnMut(&str),
         on_tool: &mut dyn FnMut(&str, &str),
         on_tool_done: &mut dyn FnMut(&str, &str),
+        on_shell_approval: &mut dyn FnMut(&str) -> ShellApproval,
     ) -> Result<()> {
         self.session.add_message(Message::user(user_input));
         self.store.save_session(self.session)?;
@@ -182,6 +189,29 @@ impl<'a> Agent<'a> {
                     for call in &calls {
                         let desc = tool_description(&call.name, &call.arguments);
                         on_tool(&call.name, &desc);
+                        match shell_command_from_call(&call.name, &call.arguments) {
+                            Ok(Some(command))
+                                if on_shell_approval(&command) == ShellApproval::Denied =>
+                            {
+                                let result_text = "Shell command was denied by the user. Do not run it again unless the user changes their mind.".to_string();
+                                let done =
+                                    tool_done_message(&call.name, &result_text, self.rollback);
+                                on_tool_done(&call.name, &done);
+                                results.push((call.id.clone(), result_text));
+                                continue;
+                            }
+                            Err(e) if call.name == "shell" => {
+                                let result_text = format!(
+                                    "Shell command was not executed because its arguments could not be parsed for approval: {e:#}"
+                                );
+                                let done =
+                                    tool_done_message(&call.name, &result_text, self.rollback);
+                                on_tool_done(&call.name, &done);
+                                results.push((call.id.clone(), result_text));
+                                continue;
+                            }
+                            _ => {}
+                        }
                         let result_text =
                             match execute_tool_call(&call.name, &call.arguments, self.rollback) {
                                 Ok(text) => text,
@@ -474,6 +504,15 @@ fn parse_tool_request(name: &str, arguments: &str) -> Result<ToolRequest> {
 /// `read_pdf` and `read_docx` are handled directly by the tools-doc crate
 /// and can read files from any path (not restricted to workspace).
 /// Other tools go through the standard tools + rollback pipeline.
+fn shell_command_from_call(name: &str, arguments: &str) -> Result<Option<String>> {
+    if name != "shell" {
+        return Ok(None);
+    }
+
+    let args: Value = parse_json_robust(arguments)?;
+    Ok(Some(get_string(&args, "command")?))
+}
+
 fn execute_tool_call(name: &str, arguments: &str, rollback: &RollbackManager) -> Result<String> {
     match name {
         "read_pdf" => {
@@ -1177,5 +1216,50 @@ pub fn build_messages_with_system(session: &Session) -> Vec<Message> {
         );
     }
 
-    full
+    sanitize_messages(&full)
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_codingagent_core::{ProviderConfig, ToolCall};
+
+    use super::*;
+
+    #[test]
+    fn context_trimming_does_not_leave_orphan_tool_results() {
+        let provider = ProviderConfig::new("test", "model");
+        let mut session = Session::new("test", ".", provider);
+        session.add_message(Message::user("x".repeat(180_000)));
+        session.add_message(Message::assistant_with_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "shell".to_string(),
+                arguments: format!(r#"{{"command":"{}"}}"#, "x".repeat(27_000)),
+            }],
+        ));
+        session.add_message(Message::tool_result("tool output", "call_1"));
+        session.add_message(Message::user("y".repeat(144_000)));
+        session.add_message(Message::assistant("latest assistant"));
+        session.add_message(Message::user("latest user"));
+
+        let messages = build_messages_with_system(&session);
+
+        for (index, message) in messages.iter().enumerate() {
+            if message.role == MessageRole::Tool {
+                let Some(tool_call_id) = &message.tool_call_id else {
+                    continue;
+                };
+                let has_preceding_call = messages[..index].iter().any(|previous| {
+                    previous.tool_calls.as_ref().map_or(false, |calls| {
+                        calls.iter().any(|call| &call.id == tool_call_id)
+                    })
+                });
+                assert!(
+                    has_preceding_call,
+                    "orphan tool result remained after trimming"
+                );
+            }
+        }
+    }
 }
