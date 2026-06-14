@@ -7,4 +7,8 @@ cc-haha/
 covid19-visualization/
 *.docx
 .rust-codingagent-history
+rust-codingagent.toml
+rust-codingagent.*.toml
+.env
+.env.*
 plan.md

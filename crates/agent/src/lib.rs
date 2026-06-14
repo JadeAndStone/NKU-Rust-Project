@@ -26,27 +26,34 @@ use walkdir::WalkDir;
 const MAX_TOOL_ROUNDS: usize = 50;
 
 /// System prompt prepended to each conversation to guide the agent's behavior.
-const SYSTEM_PROMPT: &str = r#"You are a coding agent that helps users with their software projects.
+const SYSTEM_PROMPT: &str = r#"You are a local coding CLI agent. Help the user by acting with tools whenever the task is concrete.
 Your own source code lives in NKU-Rust-Project/ — NEVER modify it unless the user explicitly asks you to improve the agent itself.
-Focus on the user's projects and tasks.
+Focus on the user's projects and local computer tasks.
+
+Language and tone:
+- Reply in Chinese by default when the user writes Chinese.
+- Do not use emoji, emoticons, cute sign-offs, or decorative AI-style expressions.
+- Be concise, direct, and task-oriented.
 
 IMPORTANT path rules:
-- `write` and `edit` are workspace-restricted: only modify files under the workspace directory.
-- `read`, `read_pdf`, `read_docx`, and `grep` can access any path (absolute or outside workspace).
-- `shell` runs commands inside the workspace directory.
+- `read`, `write`, `edit`, and `grep` are workspace-restricted: use them for files under the workspace directory.
+- `read_pdf` and `read_docx` may be used for PDF/DOCX paths the user explicitly names, including absolute paths.
+- `shell` starts in the workspace directory, but the command itself may operate on user-requested absolute paths or home-directory paths.
+- If the user asks to create, copy, move, delete, or inspect something outside the workspace, do not refuse only because `write`/`edit` are workspace-restricted. Use `shell` with a clear, safe command; the CLI will ask the user for approval before running it.
+- On Windows, the Desktop is usually `%USERPROFILE%\Desktop` in cmd or `$env:USERPROFILE\Desktop` in PowerShell.
 
-When answering:
-- Use `read` for plain text files, `read_pdf` for .pdf files, `read_docx` for .docx files.
-- Use `grep` to search for patterns in the code.
-- Use `write` to create new files (inside workspace only).
-- Use `edit` to make precise changes to existing files (inside workspace only).
-- Use `shell` to run commands (build, test, git, mkdir, etc.).
+When acting:
+- Use `read` for plain text files inside the workspace, `read_pdf` for .pdf files, `read_docx` for .docx files.
+- Use `grep` to search for patterns inside the workspace.
+- Use `write` to create new files inside the workspace.
+- Use `edit` to make precise changes to existing files inside the workspace.
+- Use `shell` to run commands, build, test, git, mkdir, or perform user-requested file operations outside the workspace.
 - Always read a file before editing it.
 - If `write` fails because the file already exists, retry immediately with overwrite: true.
-- Create directories with `shell mkdir -p` before writing files into them.
-- When creating multiple files, call multiple write tools in ONE response for speed. Batch as many writes as possible.
-- Be concise and helpful. If a tool fails, explain what happened and suggest alternatives.
-- Once you have completed the user's request, give a clear summary and STOP. Do not keep refining or running unnecessary checks."#;
+- Create directories with `shell mkdir -p` or the platform equivalent before writing files into them.
+- When creating multiple workspace files, call multiple write tools in ONE response for speed.
+- If the user asks to switch sessions, tell them to use `/会话列表` and `/会话 切换 <会话ID>`; do not say goodbye.
+- Once you have completed the user's request, give a clear summary and stop. Do not keep refining or running unnecessary checks."#;
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
@@ -120,7 +127,7 @@ impl<'a> Agent<'a> {
                             match execute_tool_call(&call.name, &call.arguments, self.rollback) {
                                 Ok(text) => text,
                                 Err(e) => {
-                                    format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。")
+                                    format!("工具执行失败: {e:#}\n请根据错误信息调整后重试。")
                                 }
                             };
                         results.push((call.id.clone(), result_text));
@@ -152,12 +159,14 @@ impl<'a> Agent<'a> {
     /// Process a user message with streaming output and optional tool-call notifications.
     ///
     /// Tokens are forwarded to `on_token` as they arrive.
+    /// `on_wait` is called while the provider is still thinking or streaming tool-call metadata.
     /// `on_tool` is called with (name, description) before each tool executes.
     /// `on_tool_done` is called with (name, result_summary) after each tool.
     pub fn run_streaming(
         &mut self,
         user_input: &str,
         on_token: &mut dyn FnMut(&str),
+        on_wait: &mut dyn FnMut(),
         on_tool: &mut dyn FnMut(&str, &str),
         on_tool_done: &mut dyn FnMut(&str, &str),
         on_shell_approval: &mut dyn FnMut(&str) -> ShellApproval,
@@ -173,7 +182,9 @@ impl<'a> Agent<'a> {
             }
 
             let request = self.build_request();
-            let response = self.provider.complete_streaming(request, on_token)?;
+            let response = self
+                .provider
+                .complete_streaming(request, on_token, on_wait)?;
 
             match response {
                 ProviderResponse::Text { content } => {
@@ -216,7 +227,7 @@ impl<'a> Agent<'a> {
                             match execute_tool_call(&call.name, &call.arguments, self.rollback) {
                                 Ok(text) => text,
                                 Err(e) => {
-                                    format!("❌ 工具执行失败: {e:#}\n请根据错误信息调整后重试。")
+                                    format!("工具执行失败: {e:#}\n请根据错误信息调整后重试。")
                                 }
                             };
                         let done = tool_done_message(&call.name, &result_text, self.rollback);
@@ -288,13 +299,13 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read".to_string(),
-            description: "Read the contents of any file. Supports absolute paths and paths outside the workspace. Returns the file content as text.".to_string(),
+            description: "Read the contents of a plain text file inside the workspace. Returns the file content as text. For plain text outside the workspace, use shell with an explicit user-approved command.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file to read. Can access files outside the workspace."
+                        "description": "Path to the file to read, relative to the workspace."
                     },
                     "max_bytes": {
                         "type": "integer",
@@ -350,7 +361,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "grep".to_string(),
-            description: "Search for a regex pattern in any directory. Can search outside the workspace. Returns matching lines with file path, line number, and column.".to_string(),
+            description: "Search for a regex pattern inside the workspace. Returns matching lines with file path, line number, and column.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -360,7 +371,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Optional subdirectory or file path to limit the search scope."
+                        "description": "Optional workspace subdirectory or file path to limit the search scope."
                     },
                     "max_matches": {
                         "type": "integer",
@@ -372,7 +383,7 @@ fn build_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "shell".to_string(),
-            description: "Execute a shell command. Default timeout 15s; for longer tasks, set timeout_ms. Use for build, test, git. NEVER use 'find /' — limit search scope. For find, use 'find <specific_dir>' with -maxdepth.".to_string(),
+            description: "Execute a shell command from the workspace directory. Default timeout 15s; for longer tasks, set timeout_ms. Use for build, test, git, and user-requested file operations on absolute paths such as Desktop or Downloads. The CLI will ask for approval before running the command. NEVER use 'find /' — limit search scope.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -690,8 +701,8 @@ fn execute_tool_call(name: &str, arguments: &str, rollback: &RollbackManager) ->
                 && !command.contains("/opt")
             {
                 return Ok(format!(
-                    "⛔ 命令被拦截: 'find /' 会扫描整个文件系统，太慢。\n\
-                    请改用具体目录: find /home/liuxuem/workspace -name '...' 等"
+                    "命令被拦截: 'find /' 会扫描整个文件系统，太慢。\n\
+                    请改用具体目录，例如在当前工作区或明确路径下搜索。"
                 ));
             }
             let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64());
@@ -1027,7 +1038,7 @@ fn tool_done_message(name: &str, result: &str, rollback: &RollbackManager) -> St
                 .and_then(|r| r.last().map(|s| s.id.as_str()))
                 .unwrap_or("?");
             let truncated = safe_truncate(result, 80);
-            format!("{truncated}  ↩️ /rollback apply {last_id}")
+            format!("{truncated}  /rollback apply {last_id}")
         }
         _ => {
             if result.len() > 100 {

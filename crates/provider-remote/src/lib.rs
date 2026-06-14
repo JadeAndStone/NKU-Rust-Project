@@ -70,12 +70,13 @@ impl LanguageProvider for RemoteProvider {
         &self,
         request: ProviderRequest,
         on_token: &mut dyn FnMut(&str),
+        on_wait: &mut dyn FnMut(),
     ) -> Result<ProviderResponse> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("failed to create tokio runtime")?;
-        rt.block_on(self.complete_streaming_async(request, on_token))
+        rt.block_on(self.complete_streaming_async(request, on_token, on_wait))
     }
 }
 
@@ -124,18 +125,30 @@ impl RemoteProvider {
         &self,
         request: ProviderRequest,
         on_token: &mut dyn FnMut(&str),
+        on_wait: &mut dyn FnMut(),
     ) -> Result<ProviderResponse> {
         let body = self.build_request_body(&request, true)?;
 
-        let response = self
+        let send_request = self
             .client
             .post(self.chat_url())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .send()
-            .await
-            .context("HTTP streaming request to LLM provider failed")?;
+            .send();
+        tokio::pin!(send_request);
+
+        let mut tick = tokio::time::interval(Duration::from_millis(120));
+        let response = loop {
+            tokio::select! {
+                result = &mut send_request => {
+                    break result.context("HTTP streaming request to LLM provider failed")?;
+                }
+                _ = tick.tick() => {
+                    on_wait();
+                }
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -150,7 +163,7 @@ impl RemoteProvider {
             );
         }
 
-        parse_sse_stream(response, on_token).await
+        parse_sse_stream(response, on_token, on_wait).await
     }
 
     fn build_request_body(
@@ -398,10 +411,12 @@ fn parse_chat_response(raw: &ChatCompletionResponse) -> Result<ProviderResponse>
 async fn parse_sse_stream(
     response: reqwest::Response,
     on_token: &mut dyn FnMut(&str),
+    on_wait: &mut dyn FnMut(),
 ) -> Result<ProviderResponse> {
     use futures_util::StreamExt;
 
     let mut stream = response.bytes_stream();
+    let mut tick = tokio::time::interval(Duration::from_millis(120));
     let mut buffer = String::new();
 
     // Accumulated tool call info keyed by index (support multiple parallel tool calls)
@@ -410,7 +425,18 @@ async fn parse_sse_stream(
     let mut tc_args: Vec<String> = Vec::new(); // [idx] = accumulated arguments
     let mut text_content = String::new();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = tick.tick() => {
+                on_wait();
+                continue;
+            }
+        };
+
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result.context("failed to read SSE chunk")?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);

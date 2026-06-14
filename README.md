@@ -89,8 +89,8 @@ NKU-Rust-Project/
 | 💬 流式输出 | SSE token 级实时输出，⏳ 思考计时 |
 | 🗂️ 会话管理 | 多 session 切换、历史恢复、/clear 新对话、上下文窗口自动截断 |
 | ⌨️ rustyline 输入 | 光标移动、↑↓ 历史、Tab 补全、历史持久化 |
-| 🎨 可视化反馈 | 工具调用图标 + 灰底亮字、文件修改提示、回滚 ID |
-| 🔒 路径保护 | Write/Edit 仅限 workspace 内，Read/Grep/PDF/DOCX 支持任意路径 |
+| 🎨 可视化反馈 | 启动卡片、loading 状态、简洁工具摘要、文件修改提示 |
+| 🔒 路径保护 | Read/Write/Edit/Grep 默认限制在 workspace；PDF/DOCX 可读取用户指定路径；外部文件操作通过 Shell 审批执行 |
 
 ## 🛠️ 技术栈
 
@@ -108,78 +108,101 @@ NKU-Rust-Project/
 
 ## 🚀 快速启动
 
-### 1. 编译
+### 1. 安装命令
+
+在项目根目录执行：
 
 ```bash
-cargo build --workspace
+cargo install --path crates/cli --force
 ```
 
-### 2. 设置 API Key
+安装完成后，确保 Cargo 的 bin 目录已经在 `PATH` 里：
+
+- Windows: `%USERPROFILE%\.cargo\bin`
+- macOS / Linux: `$HOME/.cargo/bin`
+
+之后可以在任意目录直接启动：
 
 ```bash
-export RUST_CODINGAGENT_API_KEY="sk-your-key"
-export RUST_CODINGAGENT_PROVIDER="deepseek"       # 可选，默认 deepseek
-export RUST_CODINGAGENT_MODEL="deepseek-chat"      # 可选，默认 deepseek-chat
+nku-agent
 ```
 
-也支持配置文件 `rust-codingagent.toml`：
-
-```toml
-profile = "default"
-workspace = "/home/you/workspace"
-log_level = "info"
-
-[provider]
-name = "deepseek"
-model = "deepseek-chat"
-api_base = "https://api.deepseek.com/v1"
-api_key = "sk-your-key"
-```
-
-环境变量优先级高于配置文件。
-
-### 3. 启动
+项目仍保留兼容命令：
 
 ```bash
-cargo run -- run
+rust-codingagent run
 ```
 
-进入 REPL 后直接输入自然语言即可。Agent 会自动调用工具完成任务。
+### 2. 本机配置模型密钥
+
+不要把密钥写进仓库文件。建议只设置在本机环境变量中。
+
+PowerShell：
+
+```powershell
+setx RUST_CODINGAGENT_API_KEY "<your-api-key>"
+setx RUST_CODINGAGENT_PROVIDER "deepseek"
+setx RUST_CODINGAGENT_MODEL "deepseek-chat"
+```
+
+macOS / Linux：
+
+```bash
+export RUST_CODINGAGENT_API_KEY="<your-api-key>"
+export RUST_CODINGAGENT_PROVIDER="deepseek"
+export RUST_CODINGAGENT_MODEL="deepseek-chat"
+```
+
+`setx` 写入后需要重新打开终端才会生效。`rust-codingagent.toml`、`.env`、`.env.*` 已被 `.gitignore` 排除，避免误提交本机密钥。
+
+### 3. 启动使用
+
+```bash
+nku-agent
+```
+
+进入 REPL 后直接输入中文需求即可。Agent 会按需调用读取、写入、搜索、命令执行和回滚工具。
 
 ```text
-你> 帮我读一下 Cargo.toml
-⏳ 思考中...
-⏳ 1.3s
+╭────────────────────────────────────────────────────────╮
+│   NKU·RS                                               │
+│   南开 Rust 编程助手                                   │
+│   本地代码代理 · 文件读写 · 命令审批 · 可回滚           │
+├────────────────────────────────────────────────────────┤
+│ 模型  deepseek/deepseek-chat            会话  新会话   │
+│ 工作区  C:\Users\you                                   │
+│ 快捷命令  /帮助  /会话列表  /工具  /回滚               │
+╰────────────────────────────────────────────────────────╯
 
- 📖 TOOL: 读取 Cargo.toml
- ✅ File read: Cargo.toml (257 bytes)
-
-这是一个 Cargo workspace 配置，包含 7 个 crate...
-── 1 个工具执行完毕 ──
+╰─ 你> 帮我读一下 Cargo.toml
+╭─ 思考中 ...
+╭─ 回答 0.8s
+│ 这是一个 Cargo workspace 配置...
+╰─ 完成
 ```
 
-### 4. REPL 命令
+### 4. 常用命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `/help` | 查看所有命令 |
-| `/session` | 当前会话信息 |
-| `/sessions` | 列出所有历史会话 |
-| `/session resume <id>` | 切换到指定会话 |
-| `/history` | 查看消息历史 |
-| `/model [name]` | 查看/切换模型 |
-| `/clear` | 开启新对话 |
-| `/tools` | 列出可用工具 |
-| `/rollback list` | 列出所有回滚记录 |
-| `/rollback preview <id>` | 预览回滚 diff |
-| `/rollback apply <id>` | 执行回滚恢复 |
-| `/rollback file <id> <path>` | 恢复单个文件 |
-| `exit` / `quit` | 退出 |
+| `/帮助` | 查看所有命令 |
+| `/会话` | 查看当前会话信息 |
+| `/会话列表` | 列出所有历史会话 |
+| `/会话 切换 <会话ID>` | 切换到指定会话 |
+| `/历史` | 查看消息历史 |
+| `/模型 [模型名]` | 查看或切换模型 |
+| `/清空` | 开启新对话 |
+| `/工具` | 列出可用工具 |
+| `/回滚 列表` | 列出所有回滚记录 |
+| `/回滚 预览 <记录ID>` | 预览回滚 diff |
+| `/回滚 恢复 <记录ID>` | 执行回滚恢复 |
+| `/回滚 文件 <记录ID> <路径>` | 恢复单个文件 |
+| `退出` / `exit` / `q` | 退出 |
 
 ### 5. 查看配置
 
 ```bash
-cargo run -- config    # 打印最终生效配置
+nku-agent config
 ```
 
 支持的环境变量：

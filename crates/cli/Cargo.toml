@@ -7,7 +7,11 @@ repository.workspace = true
 
 [[bin]]
 name = "rust-codingagent"
-path = "src/main.rs"
+path = "src/bin/rust-codingagent.rs"
+
+[[bin]]
+name = "nku-agent"
+path = "src/bin/nku-agent.rs"
 
 [dependencies]
 anyhow = "1.0"
@@ -22,3 +26,4 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.1"

@@ -19,30 +19,36 @@ use rustyline::validate::Validator;
 use rustyline::Helper;
 use rustyline::{CompletionType, Config, Context as ReadlineContext, Editor};
 use tracing::info;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::AppConfig;
 use crate::repl::{MainLoop, MainLoopStatus, StartupSessionItem};
 
 const HISTORY_FILE: &str = ".rust-codingagent-history";
 const ROOT_COMMANDS: &[&str] = &[
-    "/help",
-    "/session",
-    "/sessions",
-    "/history",
-    "/model",
-    "/clear",
-    "/plan",
-    "/approvals",
-    "/rollback",
-    "/tools",
-    "exit",
-    "quit",
+    "/帮助",
+    "/会话",
+    "/会话列表",
+    "/历史",
+    "/模型",
+    "/清空",
+    "/计划",
+    "/审批",
+    "/回滚",
+    "/工具",
+    "退出",
 ];
-const PLAN_SUBCOMMANDS: &[&str] = &["status", "step", "run", "clear", "help"];
-const ROLLBACK_SUBCOMMANDS: &[&str] = &["list", "preview", "apply", "file"];
-const SESSION_SUBCOMMANDS: &[&str] = &["resume"];
-const APPROVAL_SUBCOMMANDS: &[&str] = &["clear"];
+const PLAN_SUBCOMMANDS: &[&str] = &["状态", "下一步", "执行", "清空", "帮助"];
+const ROLLBACK_SUBCOMMANDS: &[&str] = &["列表", "预览", "恢复", "文件"];
+const SESSION_SUBCOMMANDS: &[&str] = &["切换"];
+const APPROVAL_SUBCOMMANDS: &[&str] = &["清空"];
 const MAX_STARTUP_SESSIONS: usize = 8;
+const RESET: &str = "\x1b[0m";
+const MUTED: &str = "\x1b[90m";
+const CYAN: &str = "\x1b[36m";
+const BORDER: &str = "\x1b[2;37m";
+const BOLD_CYAN: &str = "\x1b[1;36m";
+const WHITE: &str = "\x1b[37m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupChoice {
@@ -87,7 +93,8 @@ impl App {
         loop_runner.print_banner(&mut io::stdout().lock())?;
 
         loop {
-            let readline = editor.readline("你> ");
+            let prompt = input_prompt();
+            let readline = editor.readline(&prompt);
             match readline {
                 Ok(line) => {
                     let input = line.trim();
@@ -96,32 +103,41 @@ impl App {
                     }
                     let _ = editor.add_history_entry(input);
 
-                    if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
-                        println!("bye");
+                    if is_exit_command(input) {
+                        println!("已退出。");
                         break;
+                    }
+
+                    match loop_runner.handle_plain_intent(input, &mut io::stdout().lock()) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!("\x1b[31m错误：{e:#}\x1b[0m");
+                            continue;
+                        }
                     }
 
                     if input.starts_with('/') {
                         if let Err(e) = loop_runner.handle_command(input, &mut io::stdout().lock())
                         {
-                            eprintln!("\x1b[31merror: {e:#}\x1b[0m");
+                            eprintln!("\x1b[31m错误：{e:#}\x1b[0m");
                         }
                         continue;
                     }
 
                     if let Err(e) = loop_runner.run_agent_turn(input, &mut io::stdout().lock()) {
-                        eprintln!("\x1b[31magent error: {e:#}\x1b[0m");
+                        eprintln!("\x1b[31m助手错误：{e:#}\x1b[0m");
                     }
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
-                    println!("^C (type exit to quit)");
+                    println!("^C（输入“退出”结束）");
                 }
                 Err(rustyline::error::ReadlineError::Eof) => {
                     println!();
                     break;
                 }
                 Err(err) => {
-                    eprintln!("readline error: {err}");
+                    eprintln!("读取输入失败：{err}");
                     break;
                 }
             }
@@ -161,6 +177,18 @@ fn dirs_home() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+fn is_exit_command(input: &str) -> bool {
+    let normalized = input.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "exit" | "quit" | "q" | "bye" | "exti" | "exi" | "eit"
+    ) || matches!(input.trim(), "退出" | "/退出" | "结束" | "再见")
+}
+
+fn input_prompt() -> String {
+    "\n╰─ 你> ".to_string()
+}
+
 fn select_startup_session(loop_runner: &mut MainLoop<'_>) -> Result<()> {
     let force_menu = env::var("RUST_CODINGAGENT_CONTEXT_MENU")
         .map(|value| matches!(value.as_str(), "1" | "true" | "always"))
@@ -177,7 +205,6 @@ fn select_startup_session(loop_runner: &mut MainLoop<'_>) -> Result<()> {
         .collect::<Vec<_>>();
 
     if items.is_empty() {
-        println!("\x1b[90mNo previous conversations for this workspace/profile; starting new context.\x1b[0m");
         return Ok(());
     }
 
@@ -265,19 +292,28 @@ fn prompt_startup_session_choice_line(
     items: &[StartupSessionItem],
     default_index: usize,
 ) -> StartupChoice {
-    println!("\nRecent conversations:");
+    let width = card_width();
+    let inner = width.saturating_sub(4);
+
+    println!();
+    println!("{BORDER}╭{}╮{RESET}", "─".repeat(width.saturating_sub(2)));
+    print_card_line(inner, "▌ NKU·RS   南开 Rust 编程助手", BOLD_CYAN);
+    print_card_line(inner, "  选择要继续的会话上下文", CYAN);
+    print_card_line(inner, "  输入序号确认，n 新建。", MUTED);
+    println!("{BORDER}├{}┤{RESET}", "─".repeat(width.saturating_sub(2)));
     for (index, item) in items.iter().enumerate() {
-        println!(
-            "  {}. {}  messages={}  model={}{}",
-            index + 1,
-            item.preview,
+        let left = format!("  {}. {}", index + 1, item.preview);
+        let right = format!(
+            "消息 {} · 模型 {}{}",
             item.message_count,
             item.model,
-            if item.active { "  (active)" } else { "" }
+            if item.active { " · 当前" } else { "" }
         );
+        print_card_line(inner, &two_column_line(&left, &right, inner), WHITE);
     }
-    println!("  n. Start new conversation");
-    print!("Choose context [Enter={}]: ", default_index + 1);
+    print_card_line(inner, "  n. 新建会话", WHITE);
+    println!("{BORDER}╰{}╯{RESET}", "─".repeat(width.saturating_sub(2)));
+    print!("选择上下文 [回车={}]：", default_index + 1);
     let _ = io::stdout().flush();
 
     let mut line = String::new();
@@ -313,8 +349,16 @@ fn render_startup_session_menu(
         );
     }
 
-    println!("\n\x1b[1;36mChoose conversation context\x1b[0m");
-    println!("  Use ↑/↓ then Enter. Press n for a fresh conversation.");
+    let width = card_width();
+    let inner = width.saturating_sub(4);
+
+    println!();
+    println!("{BORDER}╭{}╮{RESET}", "─".repeat(width.saturating_sub(2)));
+    print_card_line(inner, "▌ NKU·RS   南开 Rust 编程助手", BOLD_CYAN);
+    print_card_line(inner, "  选择要继续的会话上下文", CYAN);
+    print_card_line(inner, "  ↑/↓ 切换，回车确认，n 新建。", MUTED);
+    println!("{BORDER}├{}┤{RESET}", "─".repeat(width.saturating_sub(2)));
+
     for (index, item) in items.iter().enumerate() {
         let is_selected = selected == StartupChoice::Existing(index);
         let marker = if is_selected { ">" } else { " " };
@@ -323,14 +367,14 @@ fn render_startup_session_menu(
         } else {
             "\x1b[90m"
         };
-        println!(
-            "  {style}{marker} {}. {:<72}\x1b[0m messages={} model={}{}",
-            index + 1,
-            item.preview,
+        let left = format!("{marker} {}. {}", index + 1, item.preview);
+        let right = format!(
+            "消息 {} · 模型 {}{}",
             item.message_count,
             item.model,
-            if item.active { " active" } else { "" }
+            if item.active { " · 当前" } else { "" }
         );
+        print_card_line(inner, &two_column_line(&left, &right, inner), style);
     }
 
     let is_new_selected = selected == StartupChoice::NewSession;
@@ -340,10 +384,11 @@ fn render_startup_session_menu(
     } else {
         "\x1b[90m"
     };
-    println!("  {style}{marker} n. Start new conversation\x1b[0m");
+    print_card_line(inner, &format!("{marker} n. 新建会话"), style);
+    println!("{BORDER}╰{}╯{RESET}", "─".repeat(width.saturating_sub(2)));
     let _ = io::stdout().flush();
 
-    items.len() as u16 + 4
+    items.len() as u16 + 8
 }
 
 fn clear_startup_session_menu(lines: u16) {
@@ -409,10 +454,10 @@ impl Completer for PromptHelper {
             .next()
             .unwrap_or("");
         let options = match command {
-            "/plan" => PLAN_SUBCOMMANDS,
-            "/rollback" => ROLLBACK_SUBCOMMANDS,
-            "/session" => SESSION_SUBCOMMANDS,
-            "/approvals" => APPROVAL_SUBCOMMANDS,
+            "/plan" | "/计划" => PLAN_SUBCOMMANDS,
+            "/rollback" | "/回滚" => ROLLBACK_SUBCOMMANDS,
+            "/session" | "/会话" => SESSION_SUBCOMMANDS,
+            "/approvals" | "/审批" => APPROVAL_SUBCOMMANDS,
             _ => &[],
         };
 
@@ -478,7 +523,7 @@ fn command_bar_hint(line: &str) -> Option<String> {
         .map(|suggestion| format!("{} - {}", suggestion.command, suggestion.description))
         .collect::<Vec<_>>()
         .join("   ");
-    Some(format!("\n  next: {rendered}"))
+    Some(format!("\n  可选：{rendered}"))
 }
 
 fn suggestions_for_line(line: &str) -> Vec<CommandSuggestion> {
@@ -499,51 +544,51 @@ fn suggestions_for_line(line: &str) -> Vec<CommandSuggestion> {
         .unwrap_or("");
 
     match command {
-        "/plan" => {
+        "/plan" | "/计划" => {
             let mut suggestions: Vec<CommandSuggestion> = PLAN_SUBCOMMANDS
                 .iter()
                 .filter(|option| option.starts_with(current))
                 .map(|option| {
                     command_suggestion(
-                        &format!("/plan {option}"),
+                        &format!("{command} {option}"),
                         plan_subcommand_description(option),
                     )
                 })
                 .collect();
-            if current.is_empty() || "<task>".starts_with(current) {
+            if current.is_empty() || "<任务>".starts_with(current) {
                 suggestions.push(command_suggestion(
-                    "/plan <task>",
-                    "ask the model to generate a workflow plan",
+                    &format!("{command} <任务>"),
+                    "让模型生成执行计划",
                 ));
             }
             suggestions
         }
-        "/rollback" => ROLLBACK_SUBCOMMANDS
+        "/rollback" | "/回滚" => ROLLBACK_SUBCOMMANDS
             .iter()
             .filter(|option| option.starts_with(current))
             .map(|option| {
                 command_suggestion(
-                    &format!("/rollback {option}"),
+                    &format!("{command} {option}"),
                     rollback_subcommand_description(option),
                 )
             })
             .collect(),
-        "/session" => SESSION_SUBCOMMANDS
+        "/session" | "/会话" => SESSION_SUBCOMMANDS
             .iter()
             .filter(|option| option.starts_with(current))
             .map(|option| {
                 command_suggestion(
-                    &format!("/session {option}"),
+                    &format!("{command} {option}"),
                     session_subcommand_description(option),
                 )
             })
             .collect(),
-        "/approvals" => APPROVAL_SUBCOMMANDS
+        "/approvals" | "/审批" => APPROVAL_SUBCOMMANDS
             .iter()
             .filter(|option| option.starts_with(current))
             .map(|option| {
                 command_suggestion(
-                    &format!("/approvals {option}"),
+                    &format!("{command} {option}"),
                     approval_subcommand_description(option),
                 )
             })
@@ -561,55 +606,107 @@ fn command_suggestion(command: &str, description: &str) -> CommandSuggestion {
 
 fn root_command_description(command: &str) -> &'static str {
     match command {
-        "/help" => "show all commands",
-        "/session" => "show or switch conversation context",
-        "/sessions" => "list saved conversations",
-        "/history" => "show recent messages",
-        "/model" => "show or switch model",
-        "/clear" => "start a fresh conversation",
-        "/plan" => "create or run an automated workflow",
-        "/approvals" => "manage saved shell approvals",
-        "/rollback" => "preview or restore file changes",
-        "/tools" => "list available tools",
-        "exit" => "leave the REPL",
-        "quit" => "leave the REPL",
+        "/帮助" | "/help" => "显示所有命令",
+        "/会话" | "/session" => "查看或切换会话",
+        "/会话列表" | "/sessions" => "列出保存的会话",
+        "/历史" | "/history" => "查看最近消息",
+        "/模型" | "/model" => "查看或切换模型",
+        "/清空" | "/clear" => "开启一个新会话",
+        "/计划" | "/plan" => "创建或执行工作计划",
+        "/审批" | "/approvals" => "管理命令审批规则",
+        "/回滚" | "/rollback" => "预览或恢复文件改动",
+        "/工具" | "/tools" => "列出可用工具",
+        "退出" | "exit" | "quit" => "退出交互界面",
         _ => "",
     }
 }
 
 fn plan_subcommand_description(option: &str) -> &'static str {
     match option {
-        "status" => "show the current workflow plan",
-        "step" => "run only the next plan step",
-        "run" => "run all remaining plan steps",
-        "clear" => "discard the active plan",
-        "help" => "show plan command usage",
+        "状态" | "status" => "显示当前计划",
+        "下一步" | "step" => "只执行下一步",
+        "执行" | "run" => "执行所有剩余步骤",
+        "清空" | "clear" => "清除当前计划",
+        "帮助" | "help" => "显示计划命令用法",
         _ => "",
     }
 }
 
 fn rollback_subcommand_description(option: &str) -> &'static str {
     match option {
-        "list" => "show rollback records",
-        "preview" => "preview a rollback record",
-        "apply" => "restore all files from a record",
-        "file" => "restore one file from a record",
+        "列表" | "list" => "显示回滚记录",
+        "预览" | "preview" => "预览一条回滚记录",
+        "恢复" | "apply" => "恢复该记录中的所有文件",
+        "文件" | "file" => "只恢复该记录中的一个文件",
         _ => "",
     }
 }
 
 fn session_subcommand_description(option: &str) -> &'static str {
     match option {
-        "resume" => "switch to a saved session id",
+        "切换" | "resume" => "切换到指定会话",
         _ => "",
     }
 }
 
 fn approval_subcommand_description(option: &str) -> &'static str {
     match option {
-        "clear" => "forget all saved approvals",
+        "清空" | "clear" => "清除保存的审批规则",
         _ => "",
     }
+}
+
+fn card_width() -> usize {
+    terminal::size()
+        .map(|(columns, _)| usize::from(columns).clamp(64, 88))
+        .unwrap_or(78)
+}
+
+fn print_card_line(inner: usize, content: &str, style: &str) {
+    let fitted = fit_text(content, inner);
+    let padding = inner.saturating_sub(display_width(&fitted));
+    println!("│ {style}{fitted}{RESET}{} │", " ".repeat(padding));
+}
+
+fn two_column_line(left: &str, right: &str, width: usize) -> String {
+    let right_width = display_width(right);
+    if right_width + 4 >= width {
+        return fit_text(left, width);
+    }
+
+    let left_width = width - right_width - 2;
+    let fitted_left = fit_text(left, left_width);
+    let gap = width
+        .saturating_sub(display_width(&fitted_left))
+        .saturating_sub(right_width);
+    format!("{fitted_left}{}{right}", " ".repeat(gap))
+}
+
+fn fit_text(input: &str, width: usize) -> String {
+    if display_width(input) <= width {
+        return input.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let keep = width - 3;
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in input.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + char_width > keep {
+            break;
+        }
+        output.push(ch);
+        used += char_width;
+    }
+    output.push_str("...");
+    output
+}
+
+fn display_width(input: &str) -> usize {
+    UnicodeWidthStr::width(input)
 }
 
 #[cfg(test)]
@@ -618,22 +715,22 @@ mod tests {
 
     #[test]
     fn command_bar_shows_plan_options_after_space() {
-        let hint = command_bar_hint("/plan ").unwrap();
+        let hint = command_bar_hint("/计划 ").unwrap();
 
-        assert!(hint.starts_with("\n  next:"));
-        assert!(hint.contains("/plan run"));
-        assert!(hint.contains("run all remaining plan steps"));
-        assert!(hint.contains("/plan step"));
-        assert!(hint.contains("/plan <task>"));
+        assert!(hint.starts_with("\n  可选："));
+        assert!(hint.contains("/计划 执行"));
+        assert!(hint.contains("执行所有剩余步骤"));
+        assert!(hint.contains("/计划 下一步"));
+        assert!(hint.contains("/计划 <任务>"));
     }
 
     #[test]
     fn command_bar_filters_plan_options() {
-        let suggestions = suggestions_for_line("/plan r");
+        let suggestions = suggestions_for_line("/计划 执");
 
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].command, "/plan run");
-        assert_eq!(suggestions[0].description, "run all remaining plan steps");
+        assert_eq!(suggestions[0].command, "/计划 执行");
+        assert_eq!(suggestions[0].description, "执行所有剩余步骤");
     }
 
     #[test]

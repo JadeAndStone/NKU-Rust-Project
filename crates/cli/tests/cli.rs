@@ -11,7 +11,19 @@ fn help_command_is_available() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Rust Coding Agent CLI framework"));
+    assert!(stdout.contains("南开 Rust 编程助手命令行"));
+}
+
+#[test]
+fn nku_agent_alias_is_available() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nku-agent"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("南开 Rust 编程助手命令行"));
 }
 
 #[test]
@@ -51,20 +63,32 @@ model = "mock-model"
 
 #[test]
 fn run_command_enters_main_loop() {
+    let workspace = std::env::temp_dir().join(unique_name("rust-codingagent-cli-run"));
+    std::fs::create_dir_all(&workspace).unwrap();
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_rust-codingagent"))
+        .env("RUST_CODINGAGENT_API_KEY", "sk-test")
+        .env("RUST_CODINGAGENT_WORKSPACE", &workspace)
         .arg("run")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
 
-    child.stdin.as_mut().unwrap().write_all(b"exit\n").unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all("退出\n".as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("NKU Rust Coding Agent"));
-    assert!(stdout.contains("bye"));
+    assert!(stdout.contains("南开 Rust 编程助手"));
+    assert!(stdout.contains("已退出。"));
+
+    let _ = std::fs::remove_dir_all(&workspace);
 }
 
 fn unique_name(prefix: &str) -> String {

@@ -123,7 +123,7 @@ impl Default for AppConfig {
         Self {
             profile: "default".to_string(),
             workspace: default_workspace(),
-            log_level: "info".to_string(),
+            log_level: "warn".to_string(),
             provider: ProviderConfig {
                 name: "local".to_string(),
                 model: "stub".to_string(),

@@ -61,13 +61,16 @@ pub trait LanguageProvider {
     fn complete(&self, request: ProviderRequest) -> Result<ProviderResponse>;
 
     /// Streaming completion: calls `on_token` for each text delta.
+    /// Calls `on_wait` periodically while waiting for the provider.
     /// Returns the final response (text or tool calls).
     /// Default implementation falls back to non-streaming `complete`.
     fn complete_streaming(
         &self,
         request: ProviderRequest,
         on_token: &mut dyn FnMut(&str),
+        on_wait: &mut dyn FnMut(),
     ) -> Result<ProviderResponse> {
+        on_wait();
         let response = self.complete(request)?;
         if let ProviderResponse::Text { ref content } = response {
             on_token(content);
